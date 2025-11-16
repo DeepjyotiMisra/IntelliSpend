@@ -87,6 +87,8 @@ The evaluation pipeline targets:
 
 ### Quick Setup
 
+For detailed setup instructions, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
+
 1. **Clone the repository**
 ```bash
 git clone https://github.com/yourusername/intellispend.git
@@ -121,7 +123,23 @@ MODEL_NAME=gpt-4o
 AZURE_OPENAI_ENDPOINT=https://your-azure-openai-endpoint.com
 ```
 
-5. **Run the basic agent**
+5. **Build FAISS index** (required for transaction processing)
+```bash
+# First, create merchants_seed.csv in data/ directory
+# Then build the index:
+python utils/faiss_index_builder.py
+```
+
+6. **Process transactions** (main pipeline)**
+```bash
+# Process raw_transactions.csv
+python pipeline.py
+
+# Or with custom options:
+python pipeline.py --input data/raw_transactions.csv --output output/results.csv
+```
+
+7. **Run the basic agent** (optional - for testing)
 ```bash
 cd InitialAgents
 python basicAgents.py
@@ -129,27 +147,74 @@ python basicAgents.py
 
 ### Example Usage
 
+#### Process Transactions (Main Use Case)
+
+```bash
+# Process all transactions in raw_transactions.csv
+python pipeline.py
+
+# Output will be saved to output/categorized_transactions.csv
+```
+
+#### Use Agents Directly
+
 ```python
-from InitialAgents.basicAgents import create_intellispend_agent
+from agents.preprocessor_agent import create_preprocessor_agent
+from agents.retriever_agent import create_retriever_agent
 
-# Create the agent
-agent = create_intellispend_agent()
+# Preprocessor Agent
+preprocessor = create_preprocessor_agent()
+response = preprocessor.run("Normalize: AMAZON PAY INDIA TXN 12345")
 
-# Ask financial questions
-agent.print_response("What are some effective budgeting strategies?")
-agent.print_response("How should I categorize my expenses?")
+# Retriever Agent
+retriever = create_retriever_agent()
+response = retriever.run("Find merchants for: UBER TRIP MUMBAI")
+```
+
+#### Use Tools Directly
+
+```python
+from agents.tools import normalize_transaction, retrieve_similar_merchants
+
+# Normalize transaction
+result = normalize_transaction("AMAZON PAY INDIA TXN 12345")
+print(result['normalized'])  # "AMAZON PAY INDIA"
+
+# Retrieve similar merchants
+result = retrieve_similar_merchants("AMAZON PAY INDIA", top_k=3)
+print(result['best_match']['merchant'])  # "Amazon"
 ```
 
 ## 📁 Project Structure
 
 ```
 IntelliSpend/
-├── InitialAgents/
-│   └── basicAgents.py          # Basic agent implementation
-├── requirements.txt            # Python dependencies
-├── .env.example               # Environment configuration template
-├── .env                       # Your configuration (git-ignored)
-└── README.md                  # This file
+├── agents/                     # Multi-agent system
+│   ├── preprocessor_agent.py  # Preprocessor Agent
+│   ├── retriever_agent.py     # Retriever Agent
+│   ├── tools.py               # Agent tools
+│   └── demo_preprocessor_retriever.py  # Demo script
+├── config/                     # Configuration
+│   ├── settings.py            # Settings manager
+│   └── taxonomy.json          # Category taxonomy
+├── utils/                      # Core utilities
+│   ├── data_utils.py          # Data loading & normalization
+│   ├── embedding_service.py   # Embedding generation
+│   ├── faiss_index_builder.py # Index builder
+│   └── faiss_retriever.py     # Similarity search
+├── data/                       # Data files
+│   ├── raw_transactions.csv   # Input transactions
+│   └── merchants_seed.csv     # Merchant seed data
+├── output/                     # Processed outputs
+├── pipeline.py                # Main processing pipeline
+├── docs/                      # Documentation (see docs/README.md)
+│   ├── QUICKSTART.md         # Setup guide
+│   ├── ARCHITECTURE.md       # System architecture
+│   ├── FLOW_DIAGRAM.md       # Process flows
+│   └── ...                   # More docs
+├── requirements.txt           # Python dependencies
+├── .env.example              # Environment template
+└── README.md                 # This file
 ```
 
 ## 🎯 Current Status

@@ -16,6 +16,7 @@ dist/
 venv/
 ENV/
 env/
+path/
 
 # IDE
 .vscode/
@@ -28,8 +29,25 @@ env/
 Thumbs.db
 
 # Logs
+logs/*.log
 *.log
+
+# Data files (keep structure, ignore large generated files)
+# Vector indices (generated artifacts)
+data/vector_data/*.faiss
+data/vector_data/*.pkl
+# Raw data (tracked)
+# Note: raw_transactions.csv is tracked as it's the input file
+# Note: merchants_seed.csv is tracked as seed data
+
+# Output files
+output/*.csv
+output/*.json
 
 # Temporary files
 *.tmp
 *.temp
+
+# FAISS indices
+*.faiss
+*.index

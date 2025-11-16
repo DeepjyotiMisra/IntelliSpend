@@ -1,0 +1,73 @@
+{
+  "categories": [
+    {
+      "id": "shopping",
+      "name": "Shopping",
+      "description": "Online and offline retail purchases",
+      "keywords": ["amazon", "flipkart", "myntra", "shop", "store", "retail", "purchase", "buy"]
+    },
+    {
+      "id": "food_dining",
+      "name": "Food & Dining",
+      "description": "Restaurants, cafes, food delivery, groceries",
+      "keywords": ["restaurant", "cafe", "starbucks", "zomato", "swiggy", "uber eats", "food", "dining", "grocery", "supermarket"]
+    },
+    {
+      "id": "transport",
+      "name": "Transport",
+      "description": "Rideshare, public transport, taxis, fuel",
+      "keywords": ["uber", "ola", "taxi", "metro", "bus", "train", "fuel", "petrol", "gas", "diesel"]
+    },
+    {
+      "id": "entertainment",
+      "name": "Entertainment",
+      "description": "Movies, streaming, games, events",
+      "keywords": ["netflix", "spotify", "cinema", "movie", "theater", "game", "streaming", "entertainment"]
+    },
+    {
+      "id": "utilities",
+      "name": "Utilities",
+      "description": "Electricity, water, internet, phone bills",
+      "keywords": ["electricity", "water", "internet", "phone", "broadband", "utility", "bill"]
+    },
+    {
+      "id": "healthcare",
+      "name": "Healthcare",
+      "description": "Medical services, pharmacy, health insurance",
+      "keywords": ["hospital", "clinic", "pharmacy", "medical", "doctor", "health", "medicine"]
+    },
+    {
+      "id": "education",
+      "name": "Education",
+      "description": "Tuition, courses, books, educational services",
+      "keywords": ["school", "university", "course", "tuition", "education", "book", "learning"]
+    },
+    {
+      "id": "travel",
+      "name": "Travel",
+      "description": "Hotels, flights, vacation bookings",
+      "keywords": ["hotel", "flight", "airline", "booking", "travel", "vacation", "trip"]
+    },
+    {
+      "id": "bills_payments",
+      "name": "Bills & Payments",
+      "description": "Credit card payments, loan payments, subscriptions",
+      "keywords": ["payment", "bill", "subscription", "loan", "emi", "credit card"]
+    },
+    {
+      "id": "banking",
+      "name": "Banking",
+      "description": "ATM withdrawals, bank fees, transfers",
+      "keywords": ["atm", "withdrawal", "bank", "transfer", "fee", "charges"]
+    },
+    {
+      "id": "other",
+      "name": "Other",
+      "description": "Uncategorized transactions",
+      "keywords": []
+    }
+  ],
+  "version": "1.0",
+  "last_updated": "2025-01-27"
+}
+
