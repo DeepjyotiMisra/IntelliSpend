@@ -29,7 +29,34 @@ Thumbs.db
 
 # Logs
 *.log
+intellispend.log
 
 # Temporary files
 *.tmp
 *.temp
+
+# Test files and documentation drafts
+test_*.py
+*_test.py
+ENHANCEMENT_*.md
+FINAL_*.md
+UI_FIXES_*.md
+
+# Demo and result files
+intellispend_demo_results.json
+*_demo_results.json
+*_results.json
+
+# Cache and data
+data/embeddings_cache.pkl
+data/feedback/
+data/vectors/
+data/embeddings/
+data/search_cache/
+data/feedback_knowledge/
+data/results/
+*.txt
+result.txt
+
+# Large sample files
+sample_transactions_large.json
