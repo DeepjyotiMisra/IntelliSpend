@@ -200,7 +200,7 @@ class IntelliSpendAgentTeam:
             
             for transaction in processed_transactions:
                 try:
-                    similarities = self.agents['retriever'].find_similar_merchants(
+                    similarities = self.agents['retriever'].search_similar_merchants(
                         transaction.merchant_name, top_k=5
                     )
                     similarity_results[transaction.id] = similarities
@@ -279,25 +279,21 @@ class IntelliSpendAgentTeam:
                 "results": {}
             }
 
-    def collect_feedback(self, transaction_id: str, original_prediction: CategoryPrediction,
-                        user_correction: str, transaction_data: TransactionData = None) -> Dict[str, Any]:
+    def collect_feedback(self, transaction: TransactionData, prediction: CategoryPrediction,
+                        user_feedback: Dict[str, Any]) -> Dict[str, Any]:
         """Collect user feedback and learn from it."""
         try:
-            # Collect the feedback
-            feedback_result = self.agents['feedback'].collect_feedback(
-                transaction_id, original_prediction, user_correction
+            # Process the feedback using the correct method
+            feedback_result = self.agents['feedback'].process_feedback(
+                transaction, prediction, user_feedback
             )
             
-            # If transaction data provided, learn from the correction
-            if transaction_data and feedback_result.get('status') == 'success':
-                learning_result = self.agents['feedback'].learn_from_correction(
-                    transaction_data, original_prediction, user_correction
-                )
-                
-                # Update retriever's merchant mappings
-                if learning_result.get('status') == 'success':
+            # Update retriever's merchant mappings if feedback was successful
+            if feedback_result.get('success'):
+                correct_category = user_feedback.get('correct_category')
+                if correct_category:
                     self.agents['retriever'].update_merchant_category(
-                        transaction_data.merchant, user_correction
+                        transaction.merchant_name, correct_category
                     )
             
             return feedback_result
@@ -305,7 +301,7 @@ class IntelliSpendAgentTeam:
         except Exception as e:
             logger.error(f"Error collecting feedback: {e}")
             return {
-                "status": "error",
+                "success": False,
                 "error": str(e)
             }
     
