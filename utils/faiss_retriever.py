@@ -78,20 +78,23 @@ class FAISSRetriever:
             f"{len(self.metadata)} metadata entries"
         )
     
-    def embed(self, texts: Union[str, List[str]]) -> np.ndarray:
+    def embed(self, texts: Union[str, List[str]], batch_size: int = None) -> np.ndarray:
         """
         Generate embeddings for text(s).
         
         Args:
             texts: Single string or list of strings
+            batch_size: Batch size for embedding generation (default: uses settings.BATCH_SIZE)
             
         Returns:
             Normalized embeddings as numpy array
         """
+        if batch_size is None:
+            batch_size = settings.BATCH_SIZE
         return self.embedding_service.encode(
             texts,
             normalize=True,  # Normalize for cosine similarity
-            batch_size=settings.BATCH_SIZE,
+            batch_size=batch_size,
             show_progress_bar=False
         )
     

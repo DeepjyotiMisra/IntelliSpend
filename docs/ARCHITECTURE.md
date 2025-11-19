@@ -185,18 +185,24 @@ IntelliSpend is a **multi-agent AI system** that categorizes financial transacti
    - **Used By**: Main entry point, command-line interface
 
 **Current Implementation**:
-- Uses tools directly (not agents) for efficiency
-  - **Why?** Tools are direct function calls (fast, free, deterministic)
-  - **Agents** would add LLM overhead (slow, expensive) for simple operations
-  - **Result**: Processes 2000 transactions in ~30 seconds vs ~30-60 minutes with agents
-- Preprocessor → Retriever → Direct classification from best match
-- Classifier Agent is future enhancement (for low-confidence matches requiring LLM reasoning)
+- **Hybrid Approach**: Uses tools directly for efficiency, Classifier Agent for accuracy
+  - **Fast Path**: Direct classification from FAISS matches (high confidence)
+  - **LLM Path**: Classifier Agent for low-confidence matches (when enabled)
+  - **Result**: Processes 2000 transactions in ~30 seconds (fast mode) or ~10-15 minutes (LLM mode for low-confidence only)
+- Preprocessor → Retriever → Smart Classification
+  - High confidence (≥threshold): Direct classification (fast)
+  - Low confidence (<threshold): Classifier Agent (accurate)
+- **Classifier Agent**: ✅ Implemented and integrated
+  - Supports OpenAI and Google Gemini
+  - Automatically triggered for low-confidence matches when enabled
+  - Provides LLM reasoning for ambiguous cases
 
 **Output Columns**:
 - `merchant`: Identified merchant name
 - `category`: Assigned category
 - `confidence_score`: Similarity score (0-1)
-- `match_quality`: 'high', 'low', or 'none'
+- `match_quality`: 'high', 'low', 'none', or 'agent_llm'
+- `classification_source`: 'direct', 'llm', or 'direct_fallback'
 - `payment_mode`: Payment method extracted
 - `num_matches`: Number of similar merchants found
 - `processing_status`: Success/error status
@@ -615,7 +621,7 @@ Output: {
 }
 ```
 
-**Note**: Classifier Agent (LLM-based reasoning) is a future enhancement that will improve accuracy for edge cases and low-confidence matches.
+**Note**: Classifier Agent (LLM-based reasoning) is now implemented and automatically used for low-confidence matches when enabled via `USE_CLASSIFIER_AGENT=True` or `--use-agent` flag.
 
 ---
 
@@ -692,32 +698,46 @@ agents/retriever_agent.py
 
 ---
 
-## 🚀 Next Steps (Future Components)
-
-1. **Classifier Agent**: Uses retrieved merchants + LLM to assign category (for low-confidence matches)
-2. **Feedback Agent**: Updates index with user corrections
-3. **Evaluation Module**: Metrics, confusion matrix, F1-scores
-4. **Streamlit UI**: User interface for testing and feedback
-
 ## ✅ Current Status
 
 **Implemented**:
 - ✅ Preprocessor tools (normalization, payment mode extraction)
 - ✅ Retriever tools (FAISS similarity search)
 - ✅ Main pipeline (`pipeline.py`) - processes transactions end-to-end
-- ✅ Merchant seed expansion utilities
-- ✅ Batch processing
+- ✅ Merchant seed generation utilities (comprehensive with multiple patterns)
+- ✅ Batch processing with parallel LLM calls
 - ✅ Statistics and reporting
+- ✅ Classifier Agent for LLM-based reasoning on low-confidence matches
+- ✅ Support for OpenAI and Google Gemini models
+- ✅ Smart routing: Fast path for high-confidence, LLM path for low-confidence
+- ✅ Feedback Agent for continuous learning
+- ✅ Streamlit UI with full feature set
+- ✅ Custom categories management
+- ✅ Cleanup scripts for resetting framework state
+- ✅ End-to-end testing guide
 
 **Working Flow**:
 ```
-Raw Transaction → Preprocess → Retrieve → Direct Classification (from best match) → Output
+Raw Transaction → Preprocess → Retrieve → 
+  ├─ High Confidence → Direct Classification
+  └─ Low Confidence → LLM Classification (Classifier Agent)
+  → Output → Feedback Loop (optional)
 ```
 
+**Streamlit UI Features**:
+- ✅ **Dashboard**: Overview, metrics, category distribution, confidence analysis
+- ✅ **Process Transactions**: File upload, single transaction classification, progress tracking
+- ✅ **Review & Feedback**: Transaction review, corrections, custom category creation
+- ✅ **Analytics**: Performance metrics, category trends, feedback statistics
+- ✅ **Configuration**: LLM provider selection, processing settings, thresholds
+- ✅ **Apply Feedback**: Process pending feedback, update merchant seed, rebuild index
+- ✅ **Custom Categories**: Create, manage, and delete custom categories
+- ✅ **Merchant Seed Management**: Generate, view, and rebuild merchant seed via UI
+
 **Future Enhancements**:
-- Classifier Agent for LLM-based reasoning on low-confidence matches
-- Feedback loop for continuous improvement
-- Evaluation metrics and benchmarking
+- Evaluation metrics and benchmarking dashboard
+- Advanced analytics and reporting
+- Multi-user support and authentication
 
 ---
 

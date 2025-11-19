@@ -5,7 +5,9 @@ Complete step-by-step guide to set up and run IntelliSpend transaction categoriz
 ## 📋 Prerequisites
 
 - Python 3.12+
-- OpenAI API access or Azure OpenAI endpoint
+- LLM API access (OpenAI or Google Gemini)
+  - OpenAI: API key or Azure OpenAI endpoint
+  - Google Gemini: Free tier available (recommended for testing)
 - Virtual environment (conda or venv)
 
 ---
@@ -40,19 +42,34 @@ pip install -r requirements.txt
 ## 🔐 Step 2: Configuration
 
 ### 2.1 Create Environment File
-Create a `.env` file in the project root with your OpenAI/Azure credentials:
+Create a `.env` file in the project root with your LLM credentials:
 
 ```bash
-# For Azure OpenAI
+# Option 1: Google Gemini (Recommended - Free tier available)
+GOOGLE_API_KEY=your_google_api_key
+GEMINI_MODEL_NAME=gemini-2.0-flash
+CLASSIFIER_MODEL_PROVIDER=gemini
+
+# Option 2: OpenAI (Direct)
+OPENAI_API_KEY=your_openai_api_key
+MODEL_NAME=gpt-4o-mini
+CLASSIFIER_MODEL_PROVIDER=openai
+
+# Option 3: Azure OpenAI
 OPENAI_API_KEY=your_azure_openai_api_key
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
 MODEL_NAME=gpt-4o-mini  # or your deployment name
 MODEL_API_VERSION=2024-02-15-preview
+CLASSIFIER_MODEL_PROVIDER=openai
 
-# OR for OpenAI directly
-OPENAI_API_KEY=your_openai_api_key
-MODEL_NAME=gpt-4o-mini
+# Optional: Enable Classifier Agent for low-confidence matches
+USE_CLASSIFIER_AGENT=False  # Set to True to enable
+CLASSIFIER_AGENT_THRESHOLD=0.76  # Confidence threshold to trigger agent
 ```
+
+**Get API Keys:**
+- Google Gemini: https://aistudio.google.com/apikey (Free tier available)
+- OpenAI: https://platform.openai.com/api-keys
 
 ### 2.2 Verify Configuration Files
 Ensure these files exist:
@@ -63,23 +80,32 @@ Ensure these files exist:
 
 ## 📊 Step 3: Merchant Seed Setup
 
-### 3.1 Generate Initial Merchant Seed (if not exists)
-```bash
-python utils/generate_merchant_seed.py
-```
+### 3.1 Generate Comprehensive Merchant Seed
 
-This creates `data/merchants_seed.csv` from `data/raw_transactions.csv`.
+**Option A: Using Streamlit UI (Recommended)**
+1. Start the Streamlit UI:
+   ```bash
+   streamlit run streamlit_app/app.py
+   ```
+2. Navigate to **"📚 Merchant Seed"** page
+3. Upload your transactions CSV file or use existing file path
+4. Configure:
+   - **Min Occurrences**: Minimum times a merchant must appear (default: 2)
+   - **Max Patterns per Merchant**: Maximum transaction patterns per merchant (default: 10)
+5. Click **"🔨 Generate Merchant Seed"**
+6. Click **"🔨 Rebuild FAISS Index"** to use the new seed
 
-### 3.2 Expand Merchant Seed (Recommended)
+**Option B: Using Command Line**
 ```bash
 python utils/expand_merchant_seed.py
 ```
 
-This expands the merchant seed with multiple transaction patterns per merchant for better matching accuracy.
+This generates a comprehensive merchant seed with multiple transaction patterns per merchant for better matching accuracy.
 
 **Expected Output:**
 ```
-✅ Expanded merchant seed from X to Y patterns
+✅ Generated X merchant patterns
+✅ Found Y unique merchants
 ✅ Saved to data/merchants_seed.csv
 ```
 
@@ -111,27 +137,47 @@ This will:
 
 ## 🎯 Step 5: Process Transactions
 
-### 5.1 Basic Processing
+### 5.1 Using Streamlit UI (Recommended)
+```bash
+streamlit run streamlit_app/app.py
+```
+
+Navigate to **"📊 Process Transactions"** page:
+- Upload CSV file or enter single transaction
+- Configure column names if needed
+- View real-time progress
+- Export results (CSV, JSON, Excel)
+
+### 5.2 Using Command Line
 ```bash
 python pipeline.py
 ```
 
 This processes `data/raw_transactions.csv` and saves results to `output/categorized_transactions.csv`.
 
-### 5.2 Custom Input/Output
+### 5.3 Custom Input/Output
 ```bash
 python pipeline.py --input data/my_transactions.csv --output output/my_results.csv
 ```
 
-### 5.3 Custom Column Names
+### 5.4 Custom Column Names
 ```bash
 python pipeline.py --description-col "transaction_desc" --amount-col "value" --date-col "txn_date"
 ```
 
-### 5.4 Custom Batch Size
+### 5.5 Custom Batch Size
 ```bash
 python pipeline.py --batch-size 200
 ```
+
+### 5.6 Use Classifier Agent (LLM Mode)
+Enable Classifier Agent for low-confidence matches (slower but more accurate):
+
+```bash
+python pipeline.py --use-agent
+```
+
+This will use LLM reasoning for transactions with confidence below the threshold (default: 0.76).
 
 **Expected Output:**
 ```
@@ -167,7 +213,33 @@ python agents/preprocessor_agent.py
 python agents/retriever_agent.py
 ```
 
+### 6.3 Test Classifier Agent
+```bash
+python agents/classifier_agent.py
+```
+
 **Note:** These agents use LLM for reasoning and explanations. They're slower but provide detailed explanations.
+
+## 🧹 Step 7: Cleanup (Optional)
+
+Reset the framework to clean state:
+
+```bash
+# Bash version
+./cleanup.sh
+
+# OR Python version
+python cleanup.py
+```
+
+This removes:
+- Output files
+- Test files
+- Log files
+- Python cache
+- Optionally FAISS index (you'll be asked)
+
+See [CLEANUP_README.md](../CLEANUP_README.md) for details.
 
 ---
 
@@ -176,13 +248,14 @@ python agents/retriever_agent.py
 After processing, you'll find:
 
 - `output/categorized_transactions.csv` - Categorized transactions with:
-  - `merchant`: Identified merchant name
-  - `category`: Assigned category
-  - `confidence_score`: Similarity score (0-1)
-  - `payment_mode`: Payment method (UPI, NEFT, IMPS, CARD, etc.)
-  - `match_quality`: high/low/none
-  - `num_matches`: Number of similar merchants found
-  - `top_matches`: Top 3 matching merchants
+- `merchant`: Identified merchant name
+- `category`: Assigned category
+- `confidence_score`: Similarity score (0-1)
+- `payment_mode`: Payment method (UPI, NEFT, IMPS, CARD, etc.)
+- `match_quality`: high/low/none/agent_llm
+- `classification_source`: direct/llm/direct_fallback
+- `num_matches`: Number of similar merchants found
+- `top_matches`: Top 3 matching merchants
 
 ---
 
@@ -199,17 +272,17 @@ pip install -r requirements.txt
 
 # 3. Create .env file (manually with your credentials)
 
-# 4. Generate merchant seed
-python utils/generate_merchant_seed.py
-
-# 5. Expand merchant seed (recommended)
+# 4. Generate comprehensive merchant seed (creates multiple patterns per merchant)
 python utils/expand_merchant_seed.py
 
-# 6. Build FAISS index
+# 5. Build FAISS index
 python utils/faiss_index_builder.py
 
-# 7. Process transactions
+# 6. Process transactions
 python pipeline.py
+
+# OR use the Streamlit UI for all of the above:
+streamlit run streamlit_app/app.py
 ```
 
 ---
@@ -254,9 +327,11 @@ python utils/faiss_index_builder.py
 
 ### Issue: Low confidence scores
 ```bash
-# Solution: Expand merchant seed for better matching
+# Solution: Generate comprehensive merchant seed for better matching
 python utils/expand_merchant_seed.py
 python utils/faiss_index_builder.py  # Rebuild index
+
+# OR use Streamlit UI: Navigate to "📚 Merchant Seed" page
 ```
 
 ### Issue: Processing is slow
@@ -304,18 +379,21 @@ After successful setup:
 
 | Task | Command |
 |------|---------|
-| Generate merchant seed | `python utils/generate_merchant_seed.py` |
-| Expand merchant seed | `python utils/expand_merchant_seed.py` |
+| Start Streamlit UI | `streamlit run streamlit_app/app.py` |
+| Generate merchant seed | `python utils/expand_merchant_seed.py` |
 | Build FAISS index | `python utils/faiss_index_builder.py` |
 | Process transactions | `python pipeline.py` |
 | Test preprocessor agent | `python agents/preprocessor_agent.py` |
 | Test retriever agent | `python agents/retriever_agent.py` |
+| Test classifier agent | `python agents/classifier_agent.py` |
+| Cleanup framework | `./cleanup.sh` or `python cleanup.py` |
 
 ---
 
 ## 💡 Tips
 
-- **First Run**: Always expand merchant seed before building index for better accuracy
+- **First Run**: Generate comprehensive merchant seed before building index for better accuracy
+- **UI vs CLI**: Use Streamlit UI for interactive workflows; use CLI for batch/automated processing
 - **Performance**: Current pipeline processes ~2000 transactions in ~30-45 seconds
 - **Batch Size**: Default is 100; increase for larger datasets (100K+)
 - **Agents vs Tools**: Pipeline uses tools directly (fast); agents are for explanations (slower)
@@ -333,5 +411,14 @@ For issues or questions:
 
 ---
 
-**Last Updated**: 2025-01-27
+## 📚 Additional Resources
+
+- **[E2E_TEST_GUIDE.md](../E2E_TEST_GUIDE.md)** - End-to-end testing guide
+- **[CLEANUP_README.md](../CLEANUP_README.md)** - Cleanup script documentation
+- **[docs/RAG_IMPLEMENTATION.md](RAG_IMPLEMENTATION.md)** - RAG implementation details
+- **[docs/RAG_CONCEPTS_EXPLAINED.md](RAG_CONCEPTS_EXPLAINED.md)** - RAG concepts explained
+
+---
+
+**Last Updated**: 2025-01-05
 

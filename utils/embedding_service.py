@@ -39,8 +39,13 @@ class EmbeddingService:
         """Load the sentence-transformers model (lazy loading)"""
         if self.model is None:
             try:
-                logger.info(f"Loading embedding model: {self.model_name}")
+                logger.info(f"Loading embedding model: {self.model_name} (this may take a moment on first load)...")
+                # Model loading can take time - log progress
+                import time
+                start_time = time.time()
                 self.model = SentenceTransformer(self.model_name)
+                load_time = time.time() - start_time
+                logger.info(f"Model loaded in {load_time:.2f} seconds")
                 
                 # Get embedding dimension by encoding a test string
                 test_embedding = self.model.encode(["test"], convert_to_numpy=True)

@@ -32,10 +32,17 @@ class Settings:
     # Embedding Model
     EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
     
+    # Data Directory
+    DATA_DIR = os.getenv('DATA_DIR', 'data')
+    
     # FAISS Configuration
     FAISS_INDEX_PATH = os.getenv('FAISS_INDEX_PATH', 'data/vector_data/merchant_rag_index.faiss')
     MERCHANT_METADATA_PATH = os.getenv('MERCHANT_METADATA_PATH', 'data/vector_data/merchant_rag_metadata.pkl')
     MERCHANT_SEED_PATH = os.getenv('MERCHANT_SEED_PATH', 'data/merchants_seed.csv')
+    
+    # Feedback Configuration
+    FEEDBACK_STORAGE_PATH = os.getenv('FEEDBACK_STORAGE_PATH', 'data/feedback/feedback.csv')
+    FEEDBACK_PROCESSED_PATH = os.getenv('FEEDBACK_PROCESSED_PATH', 'data/feedback/processed_feedback.csv')
     
     # Classification Thresholds
     LOCAL_MATCH_THRESHOLD = float(os.getenv('LOCAL_MATCH_THRESHOLD', '0.76'))
@@ -44,6 +51,8 @@ class Settings:
     
     # Performance Settings
     SKIP_LLM_FALLBACK = os.getenv('SKIP_LLM_FALLBACK', 'False').lower() == 'true'
+    USE_CLASSIFIER_AGENT = os.getenv('USE_CLASSIFIER_AGENT', 'False').lower() == 'true'
+    CLASSIFIER_AGENT_THRESHOLD = float(os.getenv('CLASSIFIER_AGENT_THRESHOLD', '0.65'))
     BATCH_SIZE = int(os.getenv('BATCH_SIZE', '128'))
     TOP_K_RETRIEVAL = int(os.getenv('TOP_K_RETRIEVAL', '5'))
     

@@ -44,6 +44,16 @@ python pipeline.py --description-col "transaction_desc" --amount-col "value"
 python pipeline.py --batch-size 200
 ```
 
+### Use Classifier Agent (LLM Mode)
+
+Enable Classifier Agent for low-confidence matches:
+
+```bash
+python pipeline.py --use-agent
+```
+
+This uses LLM reasoning for transactions with confidence below the threshold (default: 0.76).
+
 ## Output Format
 
 The output CSV includes all original columns plus:
@@ -52,6 +62,8 @@ The output CSV includes all original columns plus:
 - `category`: Assigned category
 - `confidence_score`: Similarity score (0-1)
 - `payment_mode`: Extracted payment mode (UPI, NEFT, IMPS, CARD, etc.)
+- `match_quality`: Classification quality (high/low/none/agent_llm)
+- `classification_source`: How classification was done (direct/llm/direct_fallback)
 - `num_matches`: Number of similar merchants found
 - `retrieval_source`: Source of retrieval (faiss, none, error)
 - `processing_status`: Processing status (success, error)
@@ -71,6 +83,12 @@ For each transaction:
     └─ Retriever Agent
        └─ Find similar merchants
        └─ Get category from best match
+    │
+    ├─ High confidence (≥threshold)
+    │  └─ Direct classification (fast)
+    │
+    └─ Low confidence (<threshold, if --use-agent)
+       └─ Classifier Agent (LLM reasoning)
     ↓
 Save Categorized Results
 ```
@@ -124,8 +142,9 @@ Processing batches: 100%|████████████| 21/21 [00:45<00:0
    ```
 
 2. **Environment Configured**: 
-   - `.env` file with OpenAI/Azure credentials
+   - `.env` file with LLM credentials (OpenAI or Google Gemini)
    - `config/taxonomy.json` exists
+   - Optional: `USE_CLASSIFIER_AGENT=True` to enable Classifier Agent
 
 3. **Dependencies Installed**:
    ```bash

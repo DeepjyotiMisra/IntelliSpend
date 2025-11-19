@@ -183,9 +183,9 @@ INPUT: "AMAZON PAY INDIA TXN 12345"
 │  }                                                            │
 └───────────────────────────────────────────────────────────────┘
 │
-│ NOTE: Classifier Agent (LLM-based reasoning) is a future     │
-│       enhancement for handling low-confidence matches and     │
-│       edge cases more intelligently.                          │
+│ NOTE: Classifier Agent (LLM-based reasoning) is now         │
+│       implemented and used for low-confidence matches       │
+│       and edge cases more intelligently.                     │
 ```
 
 ---
@@ -340,7 +340,7 @@ Raw Transaction String
     ▼
 ┌─────────────────────────────────┐
 │ LLM Reasoning                    │
-│ (classifier_agent.py - future)  │
+│ (classifier_agent.py - ✅ implemented)  │
 │                                  │
 │ Uses:                            │
 │ - Retrieved merchants            │
@@ -428,7 +428,7 @@ Returns: categorized transaction
 - ✅ Merchant seed expansion
 
 **Future Enhancements**:
-- 🔄 Classifier Agent (LLM-based reasoning for low-confidence matches)
+- ✅ Classifier Agent (LLM-based reasoning for low-confidence matches - IMPLEMENTED)
 - 🔄 Feedback loop (user corrections)
 - 🔄 Evaluation metrics
 

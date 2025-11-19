@@ -7,9 +7,9 @@ Welcome to the IntelliSpend documentation! This folder contains all framework an
 ### 🚀 Getting Started
 - **[QUICKSTART.md](QUICKSTART.md)** - Complete step-by-step setup guide
   - Environment setup
-  - Merchant seed generation
+  - Merchant seed generation (CLI or UI)
   - FAISS index building
-  - Running the pipeline
+  - Running the pipeline (CLI or Streamlit UI)
   - Troubleshooting
 
 ### 🏗️ Architecture & Design
@@ -38,8 +38,22 @@ Welcome to the IntelliSpend documentation! This folder contains all framework an
   - Hybrid approach
   - Cost comparisons
 
+### 🖥️ User Interface
+- **Streamlit UI** - Interactive web interface
+  - Dashboard with metrics and visualizations
+  - Transaction processing (file upload or single transaction)
+  - Review & Feedback system
+  - Analytics and performance tracking
+  - Configuration management
+  - Merchant seed management
+  - Custom categories management
+
 ### 🔧 Internal Documentation
 - **[CLEANUP_PLAN.md](CLEANUP_PLAN.md)** - Cleanup and refactoring notes
+
+### 📚 Technical Deep Dives
+- **[RAG_IMPLEMENTATION.md](RAG_IMPLEMENTATION.md)** - RAG implementation details
+- **[RAG_CONCEPTS_EXPLAINED.md](RAG_CONCEPTS_EXPLAINED.md)** - RAG concepts explained
 
 ---
 
@@ -78,5 +92,15 @@ docs/
 
 ---
 
-**Last Updated**: 2025-01-27
+## 🔗 Related Resources
+
+- **Main README**: See [../README.md](../README.md) for project overview
+- **E2E Test Guide**: See [../E2E_TEST_GUIDE.md](../E2E_TEST_GUIDE.md) for end-to-end testing
+- **Cleanup Guide**: See [../CLEANUP_README.md](../CLEANUP_README.md) for cleanup scripts
+- **Code**: See source code in parent directory
+- **Configuration**: See `../config/` for settings and taxonomy
+
+---
+
+**Last Updated**: 2025-01-05
 
