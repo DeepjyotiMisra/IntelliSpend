@@ -40,6 +40,7 @@ class IntelliSpendAgentTeam:
         self.agents = {}
         self._initialize_agents()
         self._setup_team()
+        self._initialize_vector_store_from_sample_data()
     
     def _initialize_agents(self):
         """Initialize all specialized agents."""
@@ -111,6 +112,34 @@ class IntelliSpendAgentTeam:
         except Exception as e:
             logger.error(f"Error setting up team: {e}")
             raise e
+    
+    def _initialize_vector_store_from_sample_data(self):
+        """Initialize vector store with merchants from sample_transactions.csv if empty."""
+        try:
+            from utils.vector_store import initialize_sample_merchants
+            import os
+            
+            # Check if vector store already has data
+            vector_store_path = "data/vectors/merchant_index.faiss"
+            
+            if not os.path.exists(vector_store_path):
+                logger.info("Vector store not found. Initializing with sample merchants...")
+                vector_store = self.agents['retriever'].vector_store
+                initialize_sample_merchants(vector_store)
+                logger.info("✅ Vector store initialized with sample merchants")
+            else:
+                # Check if vector store is empty
+                vector_store = self.agents['retriever'].vector_store
+                if vector_store.index.ntotal == 0:
+                    logger.info("Vector store is empty. Initializing with sample merchants...")
+                    initialize_sample_merchants(vector_store)
+                    logger.info("✅ Vector store initialized with sample merchants")
+                else:
+                    logger.info(f"✅ Vector store already initialized with {vector_store.index.ntotal} merchants")
+            
+        except Exception as e:
+            logger.warning(f"Could not auto-initialize vector store: {e}")
+            logger.info("Vector store will be initialized on first use")
     
     def process_transactions_parallel(self, transactions: List[TransactionData], 
                                     config: ProcessingConfig = None) -> Dict[str, Any]:
