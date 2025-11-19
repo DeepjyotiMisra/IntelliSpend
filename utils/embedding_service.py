@@ -8,8 +8,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Suppress tokenizer warnings
+# Suppress tokenizer warnings and disable multiprocessing to avoid segfaults
+# This is critical for Streamlit and threaded environments
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 
 class EmbeddingService:
@@ -43,12 +47,39 @@ class EmbeddingService:
                 # Model loading can take time - log progress
                 import time
                 start_time = time.time()
-                self.model = SentenceTransformer(self.model_name)
+                
+                # Use device='cpu' explicitly and disable multiprocessing to avoid segfaults
+                # This is especially important in Streamlit/threaded environments
+                try:
+                    self.model = SentenceTransformer(
+                        self.model_name,
+                        device='cpu',  # Explicitly use CPU for consistency
+                        trust_remote_code=False  # Disable remote code for security
+                    )
+                    # Disable multiprocessing in the model to avoid segfaults
+                    if hasattr(self.model, 'encode'):
+                        # Ensure single-threaded encoding
+                        import os
+                        os.environ['OMP_NUM_THREADS'] = '1'
+                        os.environ['MKL_NUM_THREADS'] = '1'
+                except Exception:
+                    # Fallback if device parameter not supported
+                    self.model = SentenceTransformer(self.model_name)
+                    import os
+                    os.environ['OMP_NUM_THREADS'] = '1'
+                    os.environ['MKL_NUM_THREADS'] = '1'
+                
                 load_time = time.time() - start_time
                 logger.info(f"Model loaded in {load_time:.2f} seconds")
                 
                 # Get embedding dimension by encoding a test string
-                test_embedding = self.model.encode(["test"], convert_to_numpy=True)
+                # Use a small batch to avoid unnecessary computation
+                test_embedding = self.model.encode(
+                    ["test"], 
+                    convert_to_numpy=True,
+                    batch_size=1,
+                    show_progress_bar=False
+                )
                 self._embedding_dim = test_embedding.shape[1]
                 
                 logger.info(f"Model loaded successfully. Embedding dimension: {self._embedding_dim}")

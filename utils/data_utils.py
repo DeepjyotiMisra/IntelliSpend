@@ -108,9 +108,66 @@ def load_transactions(file_path: str,
     try:
         df = pd.read_csv(path)
         
-        # Validate description column exists
+        # Auto-detect description column if the specified one doesn't exist
         if description_col not in df.columns:
-            raise ValueError(f"Description column '{description_col}' not found in {file_path}")
+            # Try common variations (case-insensitive)
+            desc_candidates = ['description', 'Description', 'DESCRIPTION', 'transaction', 'Transaction', 'desc', 'Desc']
+            detected_desc_col = None
+            for candidate in desc_candidates:
+                if candidate in df.columns:
+                    detected_desc_col = candidate
+                    break
+            if detected_desc_col is None:
+                # Try to find any column that might contain descriptions
+                for col in df.columns:
+                    if any(keyword in col.lower() for keyword in ['desc', 'transaction', 'detail', 'memo', 'note']):
+                        detected_desc_col = col
+                        break
+            if detected_desc_col:
+                logger.info(f"Auto-detected description column: '{detected_desc_col}' (requested: '{description_col}')")
+                description_col = detected_desc_col
+            else:
+                raise ValueError(f"Description column '{description_col}' not found in {file_path}. Available columns: {list(df.columns)}")
+        
+        # Auto-detect amount column if specified and not found
+        if amount_col and amount_col not in df.columns:
+            # Try common variations
+            amount_candidates = ['amount', 'Amount', 'AMOUNT', 'value', 'Value', 'VALUE', 'amt', 'Amt']
+            detected_amount_col = None
+            for candidate in amount_candidates:
+                if candidate in df.columns:
+                    detected_amount_col = candidate
+                    break
+            if detected_amount_col is None:
+                # Try to find any numeric column that might be amount
+                for col in df.columns:
+                    if any(keyword in col.lower() for keyword in ['amount', 'value', 'price', 'cost']):
+                        if pd.api.types.is_numeric_dtype(df[col]):
+                            detected_amount_col = col
+                            break
+            if detected_amount_col:
+                logger.info(f"Auto-detected amount column: '{detected_amount_col}' (requested: '{amount_col}')")
+                amount_col = detected_amount_col
+            # If still not found, amount_col is optional, so we continue
+        
+        # Normalize column names to standard lowercase names
+        # This ensures the DataFrame always has consistent column names
+        column_rename_map = {}
+        if description_col != 'description':
+            column_rename_map[description_col] = 'description'
+        if amount_col and amount_col != 'amount' and amount_col in df.columns:
+            column_rename_map[amount_col] = 'amount'
+        if date_col and date_col != 'date' and date_col in df.columns:
+            column_rename_map[date_col] = 'date'
+        
+        if column_rename_map:
+            df = df.rename(columns=column_rename_map)
+            # Update variable names to reflect renamed columns
+            description_col = 'description'
+            if amount_col:
+                amount_col = 'amount'
+            if date_col:
+                date_col = 'date'
         
         # Normalize descriptions
         df['description_normalized'] = df[description_col].apply(normalize_transaction_string)

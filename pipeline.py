@@ -433,15 +433,24 @@ def process_batch_transactions(descriptions: List[str],
     from utils.data_utils import normalize_transaction_string
     
     # Initialize retriever (this may load FAISS index and embedding model)
+    # Add granular progress updates during initialization
     logger.info("Initializing FAISS retriever and embedding model...")
     if progress_callback:
-        progress_callback(0, total, 11.0, 0, 0, "")
+        progress_callback(0, total, 11.0, 0, 0, "🔄 Loading embedding model...")
+    
+    # Pre-load embedding service with progress update
+    # This is the slowest part - loading the SentenceTransformer model
+    from utils.embedding_service import get_embedding_service
+    embedding_service = get_embedding_service()  # This loads the model synchronously
+    
+    if progress_callback:
+        progress_callback(0, total, 12.5, 0, 0, "🔄 Loading FAISS index...")
     
     retriever = get_retriever(top_k=3)
     
     # Update progress: Retriever initialized (15%)
     if progress_callback:
-        progress_callback(0, total, 15.0, 0, 0, "")
+        progress_callback(0, total, 15.0, 0, 0, "✅ Initialization complete")
     
     # Pre-check if index is loaded
     index_loaded = retriever.is_index_loaded()
@@ -590,19 +599,49 @@ def process_batch_transactions(descriptions: List[str],
                         'top_matches': all_matches[:3] if all_matches else []
                     }
             
-            # Process LLM tasks in parallel (max 5 concurrent LLM calls to avoid rate limits)
-            max_workers = min(5, len(llm_tasks))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_index = {executor.submit(process_llm_task, task): task[0] for task in llm_tasks}
-                
-                for future in as_completed(future_to_index):
+            # Process LLM tasks in parallel (max 3 concurrent LLM calls to avoid rate limits and segfaults)
+            # Reduced from 5 to 3 to avoid multiprocessing conflicts that can cause segfaults
+            max_workers = min(3, len(llm_tasks))
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_index = {executor.submit(process_llm_task, task): task[0] for task in llm_tasks}
+                    
+                    for future in as_completed(future_to_index):
+                        try:
+                            j, result = future.result(timeout=120)  # Add timeout to prevent hanging
+                            llm_results[j] = result
+                        except Exception as e:
+                            logger.error(f"Error in parallel LLM processing: {e}")
+                            j = future_to_index[future]
+                            # Create error result
+                            llm_results[j] = {
+                                'original_description': batch_descriptions[j],
+                                'normalized_description': batch_normalized[j],
+                                'payment_mode': 'UNKNOWN',
+                                'amount': batch_amounts[j] if batch_amounts else None,
+                                'date': batch_dates[j] if batch_dates else None,
+                                'merchant': 'UNKNOWN',
+                                'category': 'Other',
+                                'confidence_score': 0.0,
+                                'num_matches': 0,
+                                'retrieval_source': 'error',
+                                'classification_source': 'error',
+                                'processing_status': 'error',
+                                'error_message': str(e)
+                            }
+            except Exception as e:
+                logger.error(f"Critical error in parallel LLM processing: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Fallback: process sequentially if parallel processing fails
+                logger.warning("Falling back to sequential LLM processing due to error")
+                for task in llm_tasks:
                     try:
-                        j, result = future.result()
+                        j, result = process_llm_task(task)
                         llm_results[j] = result
-                    except Exception as e:
-                        logger.error(f"Error in parallel LLM processing: {e}")
-                        j = future_to_index[future]
-                        # Create error result
+                    except Exception as e2:
+                        logger.error(f"Error in sequential LLM processing: {e2}")
+                        j = task[0]
                         llm_results[j] = {
                             'original_description': batch_descriptions[j],
                             'normalized_description': batch_normalized[j],
@@ -616,7 +655,7 @@ def process_batch_transactions(descriptions: List[str],
                             'retrieval_source': 'error',
                             'classification_source': 'error',
                             'processing_status': 'error',
-                            'error_message': str(e)
+                            'error_message': str(e2)
                         }
         
         # Combine direct and LLM results in correct order
@@ -732,9 +771,11 @@ def process_transactions_file(input_file: str = 'data/raw_transactions.csv',
         progress_callback(0, total, 10.0, 0, 0, "")
     
     # Extract columns
-    descriptions = df[description_col].tolist()
-    amounts = df[amount_col].tolist() if amount_col in df.columns else [None] * total
-    dates = df[date_col].tolist() if date_col in df.columns else [None] * total
+    # Note: load_transactions normalizes column names to lowercase ('description', 'amount', 'date')
+    # so we use the standard names regardless of what was passed in
+    descriptions = df['description'].tolist()
+    amounts = df['amount'].tolist() if 'amount' in df.columns else [None] * total
+    dates = df['date'].tolist() if 'date' in df.columns else [None] * total
     
     # Process transactions
     start_time = time.time()
@@ -763,6 +804,19 @@ def process_transactions_file(input_file: str = 'data/raw_transactions.csv',
     # Drop duplicate column
     if 'original_description' in output_df.columns:
         output_df = output_df.drop(columns=['original_description'])
+    
+    # Normalize column names to lowercase for consistency
+    # This ensures the output always has consistent column names regardless of input
+    column_rename_map = {}
+    if 'Date' in output_df.columns and 'date' not in output_df.columns:
+        column_rename_map['Date'] = 'date'
+    if 'Description' in output_df.columns and 'description' not in output_df.columns:
+        column_rename_map['Description'] = 'description'
+    if 'Amount' in output_df.columns and 'amount' not in output_df.columns:
+        column_rename_map['Amount'] = 'amount'
+    
+    if column_rename_map:
+        output_df = output_df.rename(columns=column_rename_map)
     
     # Save results
     output_path = Path(output_file)

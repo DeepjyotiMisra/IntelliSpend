@@ -239,8 +239,35 @@ def show_dashboard():
     
     # Recent transactions table
     st.subheader("Recent Transactions")
-    display_df = df[['date', 'description', 'merchant', 'category', 'confidence_score', 'classification_source']].head(20)
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    # Handle different column name variations (Date vs date)
+    date_col = 'date' if 'date' in df.columns else ('Date' if 'Date' in df.columns else None)
+    desc_col = 'description' if 'description' in df.columns else ('Description' if 'Description' in df.columns else None)
+    
+    # Build display columns list, only including columns that exist
+    display_cols = []
+    if date_col:
+        display_cols.append(date_col)
+    if desc_col:
+        display_cols.append(desc_col)
+    if 'merchant' in df.columns:
+        display_cols.append('merchant')
+    if 'category' in df.columns:
+        display_cols.append('category')
+    if 'confidence_score' in df.columns:
+        display_cols.append('confidence_score')
+    if 'classification_source' in df.columns:
+        display_cols.append('classification_source')
+    
+    if display_cols:
+        display_df = df[display_cols].head(20)
+        # Rename columns to lowercase for consistency
+        display_df = display_df.rename(columns={
+            'Date': 'date',
+            'Description': 'description'
+        })
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    else:
+        st.warning("No displayable columns found in the data.")
     
     # Export button
     col1, col2, col3 = st.columns(3)
@@ -298,16 +325,28 @@ def show_process_transactions():
             
             st.success(f"✅ File uploaded: {len(df)} transactions")
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                description_col = st.text_input("Description Column", value="description")
-            with col2:
-                amount_col = st.text_input("Amount Column", value="amount")
-            with col3:
-                date_col = st.text_input("Date Column", value="date")
+            # Show detected columns info
+            detected_cols = []
+            if any(col.lower() in ['description', 'desc', 'transaction'] for col in df.columns):
+                desc_col = [col for col in df.columns if any(kw in col.lower() for kw in ['desc', 'transaction', 'detail'])][0]
+                detected_cols.append(f"📝 Description: **{desc_col}**")
+            if any(col.lower() in ['amount', 'amt', 'value'] for col in df.columns):
+                amt_col = [col for col in df.columns if any(kw in col.lower() for kw in ['amount', 'value', 'price']) and pd.api.types.is_numeric_dtype(df[col])][0]
+                detected_cols.append(f"💰 Amount: **{amt_col}**")
+            if any(col.lower() in ['date', 'dt', 'timestamp'] for col in df.columns):
+                date_col = [col for col in df.columns if any(kw in col.lower() for kw in ['date', 'dt', 'time'])][0]
+                detected_cols.append(f"📅 Date: **{date_col}**")
+            
+            if detected_cols:
+                st.info("🔍 Auto-detected columns: " + " | ".join(detected_cols))
             
             # Show current LLM provider
             st.info(f"🤖 Using **{st.session_state.llm_provider.upper()}** for classification (change in Configuration page)")
+            
+            # Use default column names - they will be auto-detected by load_transactions
+            description_col = None  # Will be auto-detected
+            amount_col = None  # Will be auto-detected
+            date_col = None  # Will be auto-detected
             
             if st.button("🚀 Process Transactions", type="primary", use_container_width=True):
                 # Create progress container
@@ -339,9 +378,17 @@ def show_process_transactions():
                             progress_bar.progress(pct / 100)
                             status_text.info("📥 Loading transaction file...")
                         elif pct < 15:
-                            # Initializing phase
+                            # Initializing phase - show specific status messages
                             progress_bar.progress(pct / 100)
-                            status_text.info("🔧 Initializing FAISS index and embedding model...")
+                            # Use the status message from the callback if provided
+                            if eta_str and "Loading" in eta_str:
+                                status_text.info(eta_str)
+                            elif pct < 12:
+                                status_text.info("🔄 Loading embedding model (this may take 5-10 seconds on first load)...")
+                            elif pct < 15:
+                                status_text.info("🔄 Loading FAISS index...")
+                            else:
+                                status_text.info("🔧 Initializing FAISS index and embedding model...")
                         elif pct == 15.0 and current == 0:
                             # Just finished initialization, about to start processing
                             progress_bar.progress(0.15)
@@ -1811,7 +1858,7 @@ def show_merchant_seed():
     uploaded_file = st.file_uploader(
         "Upload Transactions CSV File",
         type=['csv'],
-        help="Upload a CSV file with transaction data (columns: date, description, amount)"
+        help="Upload a CSV file with transaction data. The file should have a description/transaction column and optionally an amount column."
     )
     
     # Or use existing file path
@@ -1821,25 +1868,142 @@ def show_merchant_seed():
     if use_existing:
         transactions_file = st.text_input(
             "Transactions File Path",
-            value="data/raw_transactions.csv",
-            help="Path to raw transactions CSV file"
+            value="data/raw_transactions_bkp.csv",
+            help="Path to raw transactions CSV file. Tip: Use raw_transactions_bkp.csv (2000 transactions) for comprehensive seed generation."
         )
+    
+    # Column selection (shown after file is selected)
+    description_col = None
+    amount_col = None
+    df_preview = None
+    
+    if uploaded_file is not None:
+        try:
+            # Reset file pointer to beginning
+            uploaded_file.seek(0)
+            df_preview = pd.read_csv(uploaded_file)
+            # Reset again for later use
+            uploaded_file.seek(0)
+            
+            if df_preview.empty:
+                st.error("❌ The uploaded file is empty. Please upload a file with transaction data.")
+            elif len(df_preview.columns) == 0:
+                st.error("❌ The uploaded file has no columns. Please check the file format.")
+            else:
+                st.info(f"✅ File loaded: {len(df_preview)} transactions, {len(df_preview.columns)} columns")
+                
+                # Column selection
+                st.write("**Column Selection:**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    # Auto-detect description column
+                    desc_candidates = [col for col in df_preview.columns if any(kw in col.lower() for kw in ['desc', 'transaction', 'detail', 'memo', 'note'])]
+                    default_desc = desc_candidates[0] if desc_candidates else df_preview.columns[0]
+                    description_col = st.selectbox(
+                        "Description Column",
+                        options=list(df_preview.columns),
+                        index=list(df_preview.columns).index(default_desc) if default_desc in df_preview.columns else 0,
+                        help="Column containing transaction descriptions"
+                    )
+                with col2:
+                    # Auto-detect amount column
+                    amount_candidates = [col for col in df_preview.columns if any(kw in col.lower() for kw in ['amount', 'value', 'price', 'cost']) and pd.api.types.is_numeric_dtype(df_preview[col])]
+                    default_amount = amount_candidates[0] if amount_candidates else None
+                    if default_amount:
+                        amount_col = st.selectbox(
+                            "Amount Column (Optional)",
+                            options=["None"] + list(df_preview.columns),
+                            index=list(df_preview.columns).index(default_amount) + 1 if default_amount in df_preview.columns else 0,
+                            help="Column containing transaction amounts (optional)"
+                        )
+                        if amount_col == "None":
+                            amount_col = None
+                    else:
+                        amount_col = st.selectbox(
+                            "Amount Column (Optional)",
+                            options=["None"] + list(df_preview.columns),
+                            index=0,
+                            help="Column containing transaction amounts (optional)"
+                        )
+                        if amount_col == "None":
+                            amount_col = None
+                
+                if len(df_preview) < 100:
+                    st.warning(f"⚠️ Your file has only {len(df_preview)} transactions. For a comprehensive seed, consider using a file with 500+ transactions.")
+                else:
+                    st.info(f"✅ Good! Your file has {len(df_preview)} transactions. This should generate a comprehensive seed.")
+        except pd.errors.EmptyDataError:
+            st.error("❌ The uploaded file is empty or has no valid data. Please upload a CSV file with transaction data.")
+        except Exception as e:
+            st.warning(f"⚠️ Could not preview file: {str(e)}")
+    elif use_existing and transactions_file:
+        if Path(transactions_file).exists():
+            try:
+                df_preview = pd.read_csv(transactions_file)
+                
+                st.info(f"✅ File loaded: {len(df_preview)} transactions, {len(df_preview.columns)} columns")
+                
+                # Column selection
+                st.write("**Column Selection:**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    # Auto-detect description column
+                    desc_candidates = [col for col in df_preview.columns if any(kw in col.lower() for kw in ['desc', 'transaction', 'detail', 'memo', 'note'])]
+                    default_desc = desc_candidates[0] if desc_candidates else df_preview.columns[0]
+                    description_col = st.selectbox(
+                        "Description Column",
+                        options=list(df_preview.columns),
+                        index=list(df_preview.columns).index(default_desc) if default_desc in df_preview.columns else 0,
+                        help="Column containing transaction descriptions",
+                        key="desc_col_existing"
+                    )
+                with col2:
+                    # Auto-detect amount column
+                    amount_candidates = [col for col in df_preview.columns if any(kw in col.lower() for kw in ['amount', 'value', 'price', 'cost']) and pd.api.types.is_numeric_dtype(df_preview[col])]
+                    default_amount = amount_candidates[0] if amount_candidates else None
+                    if default_amount:
+                        amount_col = st.selectbox(
+                            "Amount Column (Optional)",
+                            options=["None"] + list(df_preview.columns),
+                            index=list(df_preview.columns).index(default_amount) + 1 if default_amount in df_preview.columns else 0,
+                            help="Column containing transaction amounts (optional)",
+                            key="amount_col_existing"
+                        )
+                        if amount_col == "None":
+                            amount_col = None
+                    else:
+                        amount_col = st.selectbox(
+                            "Amount Column (Optional)",
+                            options=["None"] + list(df_preview.columns),
+                            index=0,
+                            help="Column containing transaction amounts (optional)",
+                            key="amount_col_existing2"
+                        )
+                        if amount_col == "None":
+                            amount_col = None
+                
+                if len(df_preview) < 100:
+                    st.warning(f"⚠️ Selected file has only {len(df_preview)} transactions. For a comprehensive seed, consider using 'data/raw_transactions_bkp.csv' (2000 transactions).")
+                else:
+                    st.info(f"✅ Good! Selected file has {len(df_preview)} transactions. This should generate a comprehensive seed.")
+            except Exception as e:
+                st.warning(f"⚠️ Could not preview file: {str(e)}")
     
     col1, col2 = st.columns(2)
     with col1:
         min_occurrences = st.number_input(
             "Min Occurrences",
-            value=2,
+            value=1,
             min_value=1,
-            help="Minimum occurrences to include a merchant"
+            help="Minimum occurrences to include a merchant. Use 1 for maximum coverage (includes all merchants), 2+ to filter rare merchants."
         )
     with col2:
         max_patterns = st.number_input(
             "Max Patterns per Merchant",
-            value=10,
+            value=15,
             min_value=1,
             max_value=50,
-            help="Maximum transaction patterns per merchant"
+            help="Maximum transaction patterns per merchant. Higher values = more comprehensive seed (recommended: 10-15)"
         )
     
     if st.button("🔨 Generate Merchant Seed", type="primary", use_container_width=True):
@@ -1852,24 +2016,142 @@ def show_merchant_seed():
             temp_file_path = Path("data/temp_transactions_for_seed.csv")
             temp_file_path.parent.mkdir(parents=True, exist_ok=True)
             
-            df_upload = pd.read_csv(uploaded_file)
-            df_upload.to_csv(temp_file_path, index=False)
-            file_to_use = str(temp_file_path)
-            st.info(f"📁 Using uploaded file: {uploaded_file.name} ({len(df_upload)} transactions)")
+            try:
+                # Reset file pointer to beginning
+                uploaded_file.seek(0)
+                df_upload = pd.read_csv(uploaded_file)
+                
+                if df_upload.empty:
+                    st.error("❌ The uploaded file is empty. Please upload a file with transaction data.")
+                    st.stop()
+                
+                if len(df_upload.columns) == 0:
+                    st.error("❌ The uploaded file has no columns. Please check the file format.")
+                    st.stop()
+                
+                # Auto-detect and rename columns to standard names
+                # First, try to detect description column
+                if description_col is None or description_col not in df_upload.columns:
+                    desc_candidates = [col for col in df_upload.columns if any(kw in col.lower() for kw in ['desc', 'transaction', 'detail', 'memo', 'note'])]
+                    description_col = desc_candidates[0] if desc_candidates else df_upload.columns[0]
+                
+                # Rename description column
+                if description_col and description_col in df_upload.columns and description_col != 'description':
+                    df_upload = df_upload.rename(columns={description_col: 'description'})
+                    st.info(f"📝 Using '{description_col}' as description column")
+                
+                # Auto-detect and rename amount column
+                if amount_col is None or (amount_col not in df_upload.columns and amount_col != "None"):
+                    amount_candidates = [col for col in df_upload.columns if any(kw in col.lower() for kw in ['amount', 'value', 'price', 'cost']) and pd.api.types.is_numeric_dtype(df_upload[col])]
+                    amount_col = amount_candidates[0] if amount_candidates else None
+                
+                if amount_col and amount_col in df_upload.columns and amount_col != 'amount':
+                    df_upload = df_upload.rename(columns={amount_col: 'amount'})
+                    st.info(f"💰 Using '{amount_col}' as amount column")
+                elif 'amount' not in df_upload.columns:
+                    # Add dummy amount column if not provided
+                    df_upload['amount'] = 0.0
+                    st.info("💰 Amount column not found, using 0.0 for all transactions")
+                
+                # Verify required columns exist
+                if 'description' not in df_upload.columns:
+                    st.error(f"❌ Could not find description column. Available columns: {list(df_upload.columns)}")
+                    st.stop()
+                
+                # Save file with correct columns
+                df_upload.to_csv(temp_file_path, index=False)
+                
+                # Verify the saved file has correct columns
+                df_verify = pd.read_csv(temp_file_path)
+                if 'description' not in df_verify.columns:
+                    st.error(f"❌ Error: Saved file does not have 'description' column. Columns: {list(df_verify.columns)}")
+                    st.stop()
+                
+                file_to_use = str(temp_file_path)
+                st.info(f"📁 Using uploaded file: {uploaded_file.name} ({len(df_upload)} transactions)")
+                st.info(f"📋 Columns in processed file: {list(df_upload.columns)}")
+            except pd.errors.EmptyDataError:
+                st.error("❌ The uploaded file is empty or has no valid data. Please upload a CSV file with transaction data.")
+                st.stop()
+            except Exception as e:
+                st.error(f"❌ Error reading uploaded file: {str(e)}")
+                st.stop()
         elif use_existing and transactions_file:
             if not Path(transactions_file).exists():
                 st.error(f"❌ File not found: {transactions_file}")
                 st.stop()
-            file_to_use = transactions_file
+            
+            # Always process the file to ensure correct column names
+            try:
+                df_existing = pd.read_csv(transactions_file)
+                
+                # Auto-detect description column if not provided
+                if description_col is None or description_col not in df_existing.columns:
+                    desc_candidates = [col for col in df_existing.columns if any(kw in col.lower() for kw in ['desc', 'transaction', 'detail', 'memo', 'note'])]
+                    description_col = desc_candidates[0] if desc_candidates else df_existing.columns[0]
+                
+                # Rename description column
+                if description_col and description_col in df_existing.columns and description_col != 'description':
+                    df_existing = df_existing.rename(columns={description_col: 'description'})
+                    st.info(f"📝 Using '{description_col}' as description column")
+                
+                # Auto-detect amount column if not provided
+                if amount_col is None or (amount_col not in df_existing.columns and amount_col != "None"):
+                    amount_candidates = [col for col in df_existing.columns if any(kw in col.lower() for kw in ['amount', 'value', 'price', 'cost']) and pd.api.types.is_numeric_dtype(df_existing[col])]
+                    amount_col = amount_candidates[0] if amount_candidates else None
+                
+                if amount_col and amount_col in df_existing.columns and amount_col != 'amount':
+                    df_existing = df_existing.rename(columns={amount_col: 'amount'})
+                    st.info(f"💰 Using '{amount_col}' as amount column")
+                elif 'amount' not in df_existing.columns:
+                    df_existing['amount'] = 0.0
+                    st.info("💰 Amount column not found, using 0.0 for all transactions")
+                
+                # Verify required columns exist
+                if 'description' not in df_existing.columns:
+                    st.error(f"❌ Could not find description column. Available columns: {list(df_existing.columns)}")
+                    st.stop()
+                
+                # Always create temp file to ensure correct column names
+                temp_file_path = Path("data/temp_transactions_for_seed_existing.csv")
+                temp_file_path.parent.mkdir(parents=True, exist_ok=True)
+                df_existing.to_csv(temp_file_path, index=False)
+                
+                # Verify the saved file has correct columns
+                df_verify = pd.read_csv(temp_file_path)
+                if 'description' not in df_verify.columns:
+                    st.error(f"❌ Error: Saved file does not have 'description' column. Columns: {list(df_verify.columns)}")
+                    st.stop()
+                
+                file_to_use = str(temp_file_path)
+                st.info(f"📋 Columns in processed file: {list(df_existing.columns)}")
+            except Exception as e:
+                st.error(f"❌ Error processing file: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+                st.stop()
         else:
             st.error("❌ Please upload a file or provide a file path")
             st.stop()
         
         if file_to_use:
+            # Verify the file exists and has correct columns before calling expand_merchant_seed
+            try:
+                df_check = pd.read_csv(file_to_use)
+                if 'description' not in df_check.columns:
+                    st.error(f"❌ Error: File '{file_to_use}' does not have 'description' column.")
+                    st.error(f"Available columns: {list(df_check.columns)}")
+                    st.error("This should not happen - please try uploading the file again.")
+                    st.stop()
+            except Exception as e:
+                st.error(f"❌ Error reading file before processing: {e}")
+                st.stop()
+            
             with st.spinner("Generating comprehensive merchant seed (this may take a moment)..."):
                 try:
                     from utils.expand_merchant_seed import expand_merchant_seed
                     
+                    st.info(f"🔍 Processing file: {file_to_use}")
                     seed_df = expand_merchant_seed(
                         transactions_file=file_to_use,
                         output_file=str(seed_path),
@@ -1877,9 +2159,12 @@ def show_merchant_seed():
                         max_patterns_per_merchant=int(max_patterns)
                     )
                     
-                    # Clean up temp file if created
+                    # Clean up temp files if created
                     if temp_file_path and temp_file_path.exists():
                         temp_file_path.unlink()
+                    temp_existing_path = Path("data/temp_transactions_for_seed_existing.csv")
+                    if temp_existing_path.exists():
+                        temp_existing_path.unlink()
                     
                     st.success(f"✅ Generated {len(seed_df)} merchant patterns!")
                     st.info(f"💡 Found {seed_df['merchant'].nunique() if 'merchant' in seed_df.columns else 0} unique merchants")
@@ -1887,9 +2172,12 @@ def show_merchant_seed():
                     time.sleep(1)
                     st.rerun()
                 except Exception as e:
-                    # Clean up temp file on error
+                    # Clean up temp files on error
                     if temp_file_path and temp_file_path.exists():
                         temp_file_path.unlink()
+                    temp_existing_path = Path("data/temp_transactions_for_seed_existing.csv")
+                    if temp_existing_path.exists():
+                        temp_existing_path.unlink()
                     st.error(f"❌ Error: {e}")
                     import traceback
                     st.code(traceback.format_exc())

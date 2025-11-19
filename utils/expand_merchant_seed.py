@@ -142,7 +142,9 @@ def categorize_merchant(merchant: str, description: str) -> str:
 def expand_merchant_seed(transactions_file: str = 'data/raw_transactions.csv',
                         output_file: str = 'data/merchants_seed.csv',
                         min_occurrences: int = 2,
-                        max_patterns_per_merchant: int = 10) -> pd.DataFrame:
+                        max_patterns_per_merchant: int = 10,
+                        description_col: str = None,
+                        amount_col: str = None) -> pd.DataFrame:
     """
     Expand merchant seed with multiple transaction patterns per merchant.
     
@@ -151,12 +153,54 @@ def expand_merchant_seed(transactions_file: str = 'data/raw_transactions.csv',
         output_file: Path to save expanded merchants seed CSV
         min_occurrences: Minimum occurrences to include merchant
         max_patterns_per_merchant: Maximum patterns to include per merchant
+        description_col: Name of description column (auto-detected if None)
+        amount_col: Name of amount column (auto-detected if None)
         
     Returns:
         DataFrame with expanded merchant seed data
     """
     logger.info(f"Loading transactions from {transactions_file}...")
     df = pd.read_csv(transactions_file)
+    
+    # Auto-detect column names if not provided
+    if description_col is None:
+        # Try common variations (case-insensitive)
+        desc_candidates = ['description', 'Description', 'DESCRIPTION', 'transaction', 'Transaction', 'desc', 'Desc']
+        description_col = None
+        for candidate in desc_candidates:
+            if candidate in df.columns:
+                description_col = candidate
+                break
+        if description_col is None:
+            # Try to find any column that might contain descriptions
+            for col in df.columns:
+                if any(keyword in col.lower() for keyword in ['desc', 'transaction', 'detail', 'memo', 'note']):
+                    description_col = col
+                    break
+        if description_col is None:
+            raise ValueError(f"Could not find description column. Available columns: {list(df.columns)}")
+    
+    if amount_col is None:
+        # Try common variations (case-insensitive)
+        amount_candidates = ['amount', 'Amount', 'AMOUNT', 'value', 'Value', 'VALUE', 'amt', 'Amt']
+        amount_col = None
+        for candidate in amount_candidates:
+            if candidate in df.columns:
+                amount_col = candidate
+                break
+        if amount_col is None:
+            # Try to find any numeric column that might be amount
+            for col in df.columns:
+                if any(keyword in col.lower() for keyword in ['amount', 'value', 'price', 'cost']):
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        amount_col = col
+                        break
+        # If still not found, it's optional
+        if amount_col is None:
+            logger.warning("Amount column not found, will use 0.0 for all transactions")
+            amount_col = None
+    
+    logger.info(f"Using columns: description='{description_col}', amount='{amount_col}'")
     
     # Group transactions by merchant
     merchant_data = defaultdict(lambda: {
@@ -168,8 +212,8 @@ def expand_merchant_seed(transactions_file: str = 'data/raw_transactions.csv',
     
     logger.info("Extracting merchants from transactions...")
     for _, row in df.iterrows():
-        desc = str(row.get('description', ''))
-        amount = row.get('amount', 0.0)
+        desc = str(row.get(description_col, ''))
+        amount = row.get(amount_col, 0.0) if amount_col else 0.0
         
         merchant = extract_merchant_from_description(desc)
         if merchant and merchant != 'UNKNOWN':

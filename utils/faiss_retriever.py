@@ -62,20 +62,28 @@ class FAISSRetriever:
         if not self.metadata_path.exists():
             raise FileNotFoundError(f"Metadata not found at {self.metadata_path}")
         
+        import time
+        start_time = time.time()
+        
         logger.info(f"Loading FAISS index from {self.index_path}...")
         self.index = faiss.read_index(str(self.index_path))
+        index_load_time = time.time() - start_time
         
         logger.info(f"Loading metadata from {self.metadata_path}...")
+        metadata_start = time.time()
         with open(self.metadata_path, 'rb') as f:
             self.metadata = pickle.load(f)
+        metadata_load_time = time.time() - metadata_start
         
         # Validate metadata structure
         if not isinstance(self.metadata, list):
             raise ValueError("Metadata should be a list of dicts")
         
+        total_load_time = time.time() - start_time
         logger.info(
             f"Loaded index with {self.index.ntotal} vectors and "
-            f"{len(self.metadata)} metadata entries"
+            f"{len(self.metadata)} metadata entries "
+            f"(index: {index_load_time:.2f}s, metadata: {metadata_load_time:.2f}s, total: {total_load_time:.2f}s)"
         )
     
     def embed(self, texts: Union[str, List[str]], batch_size: int = None) -> np.ndarray:
