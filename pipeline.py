@@ -794,23 +794,66 @@ def process_transactions_file(input_file: str = 'data/raw_transactions.csv',
                   'match_quality', 'classification_source']
     available_cols = [col for col in merge_cols if col in results_df.columns]
     
+    # Ensure 'original_description' is always included for the merge
+    if 'original_description' not in available_cols and 'original_description' in results_df.columns:
+        available_cols.append('original_description')
+    
     # Note: load_transactions normalizes column names to lowercase ('description', 'amount', 'date')
     # So we always use 'description' for the merge, regardless of what was passed in
     merge_key = 'description'  # Always use normalized column name
     
+    # Verify the merge key exists in output_df
     if merge_key not in output_df.columns:
+        # Try to find description column with different cases
+        desc_candidates = [col for col in output_df.columns if col.lower() == 'description']
+        if desc_candidates:
+            merge_key = desc_candidates[0]
+            logger.warning(f"Using '{merge_key}' instead of 'description' for merge")
+        else:
+            raise ValueError(
+                f"Expected 'description' column not found in output DataFrame. "
+                f"Available columns: {list(output_df.columns)}. "
+                f"This should not happen - load_transactions should normalize column names."
+            )
+    
+    # Verify 'original_description' exists in results_df
+    if 'original_description' not in results_df.columns:
         raise ValueError(
-            f"Expected 'description' column not found in output DataFrame. "
-            f"Available columns: {list(output_df.columns)}. "
-            f"This should not happen - load_transactions should normalize column names."
+            f"Expected 'original_description' column not found in results DataFrame. "
+            f"Available columns: {list(results_df.columns)}."
         )
     
-    output_df = output_df.merge(
-        results_df[available_cols],
-        left_on=merge_key,
-        right_on='original_description',
-        how='left'
-    )
+    # Final validation before merge
+    if not merge_key or merge_key is None:
+        raise ValueError(f"Invalid merge_key: {merge_key}. Cannot perform merge.")
+    
+    if merge_key not in output_df.columns:
+        raise ValueError(
+            f"Merge key '{merge_key}' not found in output_df. "
+            f"Available columns: {list(output_df.columns)}"
+        )
+    
+    if 'original_description' not in results_df.columns:
+        raise ValueError(
+            f"'original_description' not found in results_df. "
+            f"Available columns: {list(results_df.columns)}"
+        )
+    
+    # Perform the merge
+    try:
+        logger.debug(f"Merging: left_on='{merge_key}', right_on='original_description'")
+        logger.debug(f"output_df shape: {output_df.shape}, results_df shape: {results_df[available_cols].shape}")
+        output_df = output_df.merge(
+            results_df[available_cols],
+            left_on=merge_key,
+            right_on='original_description',
+            how='left'
+        )
+    except Exception as e:
+        logger.error(f"Merge failed. output_df columns: {list(output_df.columns)}")
+        logger.error(f"results_df columns: {list(results_df.columns)}")
+        logger.error(f"merge_key: '{merge_key}' (type: {type(merge_key)}), available_cols: {available_cols}")
+        raise ValueError(f"Failed to merge results: {e}") from e
     
     # Drop duplicate column
     if 'original_description' in output_df.columns:
