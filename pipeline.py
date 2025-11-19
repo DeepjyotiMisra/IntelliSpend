@@ -794,9 +794,20 @@ def process_transactions_file(input_file: str = 'data/raw_transactions.csv',
                   'match_quality', 'classification_source']
     available_cols = [col for col in merge_cols if col in results_df.columns]
     
+    # Note: load_transactions normalizes column names to lowercase ('description', 'amount', 'date')
+    # So we always use 'description' for the merge, regardless of what was passed in
+    merge_key = 'description'  # Always use normalized column name
+    
+    if merge_key not in output_df.columns:
+        raise ValueError(
+            f"Expected 'description' column not found in output DataFrame. "
+            f"Available columns: {list(output_df.columns)}. "
+            f"This should not happen - load_transactions should normalize column names."
+        )
+    
     output_df = output_df.merge(
         results_df[available_cols],
-        left_on=description_col,
+        left_on=merge_key,
         right_on='original_description',
         how='left'
     )
