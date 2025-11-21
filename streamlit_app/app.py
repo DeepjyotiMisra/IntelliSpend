@@ -95,6 +95,10 @@ if 'feedback_provider' not in st.session_state:
     import os
     st.session_state.feedback_provider = os.getenv('FEEDBACK_MODEL_PROVIDER', 'gemini').lower()
 
+# Initialize session state for processing status
+if 'is_processing' not in st.session_state:
+    st.session_state.is_processing = False
+
 # Initialize session state for single transaction feedback
 if 'show_feedback_form' not in st.session_state:
     st.session_state.show_feedback_form = False
@@ -114,11 +118,44 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Navigation")
-        page = st.radio(
-            "Choose a page:",
-            ["🏠 Dashboard", "📊 Process Transactions", "✏️ Review & Feedback", "📈 Analytics", "⚙️ Configuration", "🔄 Apply Feedback", "🏷️ Custom Categories", "📚 Merchant Seed"],
-            label_visibility="collapsed"
-        )
+        
+        # Store current page in session state to preserve it
+        if 'current_page' not in st.session_state:
+            st.session_state.current_page = "📊 Process Transactions"
+        
+        # If processing is active, lock to Process Transactions page and disable navigation
+        if st.session_state.is_processing:
+            page = "📊 Process Transactions"
+            st.session_state.current_page = page
+            # Show disabled radio with Process Transactions selected
+            st.radio(
+                "Choose a page:",
+                ["🏠 Dashboard", "📊 Process Transactions", "✏️ Review & Feedback", "📈 Analytics", "⚙️ Configuration", "🔄 Apply Feedback", "🏷️ Custom Categories", "📚 Merchant Seed"],
+                label_visibility="collapsed",
+                disabled=True,
+                index=1  # Process Transactions is index 1
+            )
+            st.warning("⚠️ **Processing in progress. Navigation disabled.**")
+        else:
+            # Normal navigation when not processing
+            # Use the radio button value directly and sync with current_page
+            pages = ["🏠 Dashboard", "📊 Process Transactions", "✏️ Review & Feedback", "📈 Analytics", "⚙️ Configuration", "🔄 Apply Feedback", "🏷️ Custom Categories", "📚 Merchant Seed"]
+            
+            # Use key-based state management - Streamlit will handle the state automatically
+            # Initialize the radio state if not exists
+            if "navigation_radio" not in st.session_state:
+                st.session_state.navigation_radio = st.session_state.current_page
+            
+            # Get page from radio button (uses key-based state)
+            page = st.radio(
+                "Choose a page:",
+                pages,
+                label_visibility="collapsed",
+                key="navigation_radio"
+            )
+            
+            # Sync current_page with radio selection
+            st.session_state.current_page = page
         
         st.divider()
         
@@ -157,6 +194,12 @@ def main():
         st.write(f"**Classifier:** {st.session_state.llm_provider.upper()}")
         st.write(f"**Feedback:** {st.session_state.feedback_provider.upper()}")
         st.caption("Change in Configuration page")
+    
+    # Force page to Process Transactions if processing is active (safety check)
+    if st.session_state.is_processing and page != "📊 Process Transactions":
+        page = "📊 Process Transactions"
+        st.session_state.current_page = page
+        st.rerun()
     
     # Route to appropriate page
     if page == "🏠 Dashboard":
@@ -304,6 +347,70 @@ def show_process_transactions():
     """Process transactions page"""
     st.header("📊 Process Transactions")
     
+    # Show export options if processing just completed
+    if st.session_state.get('show_export_options', False) and 'export_result_df' in st.session_state:
+        result_df = st.session_state.export_result_df
+        st.success(f"✅ Processed {len(result_df)} transactions successfully!")
+        st.divider()
+        st.subheader("📥 Export Results")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            csv = result_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv,
+                file_name=f"categorized_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with col2:
+            json = result_df.to_json(orient='records', indent=2)
+            st.download_button(
+                label="📥 Download JSON",
+                data=json,
+                file_name=f"categorized_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        with col3:
+            try:
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                    result_df.to_excel(writer, index=False, sheet_name='Transactions')
+                excel_data = excel_buffer.getvalue()
+                st.download_button(
+                    label="📥 Download Excel",
+                    data=excel_data,
+                    file_name=f"categorized_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            except ImportError:
+                st.info("💡 Install openpyxl for Excel export: `pip install openpyxl`")
+        # Clear the flag after showing
+        st.session_state.show_export_options = False
+        if 'export_result_df' in st.session_state:
+            del st.session_state.export_result_df
+        st.divider()
+    
+    # Show processing status and stop button if active
+    if st.session_state.is_processing:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.warning("⚠️ **Processing is in progress. Please wait for it to complete.**")
+        with col2:
+            if st.button("🛑 Stop Processing", type="secondary", use_container_width=True):
+                st.session_state.is_processing = False
+                if 'processing_started' in st.session_state:
+                    del st.session_state.processing_started
+                # Sync radio state with current page
+                if "navigation_radio" in st.session_state:
+                    st.session_state.navigation_radio = st.session_state.current_page
+                st.warning("⚠️ Processing stopped. You can start a new processing job.")
+                # Stay on Process Transactions page - no navigation change
+                st.rerun()
+        st.divider()
+    
     tab1, tab2 = st.tabs(["📁 File Upload", "✍️ Single Transaction"])
     
     with tab1:
@@ -348,7 +455,16 @@ def show_process_transactions():
             amount_col = None  # Will be auto-detected
             date_col = None  # Will be auto-detected
             
-            if st.button("🚀 Process Transactions", type="primary", use_container_width=True):
+            if st.button("🚀 Process Transactions", type="primary", use_container_width=True, disabled=st.session_state.is_processing):
+                # Set processing flag IMMEDIATELY and rerun to disable navigation
+                st.session_state.is_processing = True
+                st.rerun()
+            
+            # Check if we're in processing state (after rerun)
+            if st.session_state.is_processing and 'processing_started' not in st.session_state:
+                # Mark that processing has started
+                st.session_state.processing_started = True
+                
                 # Create progress container
                 progress_container = st.container()
                 with progress_container:
@@ -432,59 +548,45 @@ def show_process_transactions():
                     progress_bar.progress(1.0)
                     status_text.success(f"✅ Processing complete! Processed {total_count} transactions")
                     
+                    # Clear processing flag
+                    st.session_state.is_processing = False
+                    if 'processing_started' in st.session_state:
+                        del st.session_state.processing_started
+                    
+                    # Sync radio state with current page to ensure proper navigation
+                    if "navigation_radio" in st.session_state:
+                        st.session_state.navigation_radio = st.session_state.current_page
+                    
                     # Clear progress indicators
                     time.sleep(0.5)
                     status_text.empty()
                     
                     st.session_state.processed_data = result_df
                     st.session_state.processing_status = "success"
+                    # Store result for showing export options after rerun
+                    st.session_state.show_export_options = True
+                    st.session_state.export_result_df = result_df
                     
                     st.success(f"✅ Processed {len(result_df)} transactions successfully!")
                     st.balloons()
                     
-                    # Show export options
-                    st.divider()
-                    st.subheader("📥 Export Results")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        csv = result_df.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download CSV",
-                            data=csv,
-                            file_name=f"categorized_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-                    with col2:
-                        json = result_df.to_json(orient='records', indent=2)
-                        st.download_button(
-                            label="📥 Download JSON",
-                            data=json,
-                            file_name=f"categorized_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                            mime="application/json",
-                            use_container_width=True
-                        )
-                    with col3:
-                        try:
-                            excel_buffer = io.BytesIO()
-                            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                                result_df.to_excel(writer, index=False, sheet_name='Transactions')
-                            excel_data = excel_buffer.getvalue()
-                            st.download_button(
-                                label="📥 Download Excel",
-                                data=excel_data,
-                                file_name=f"categorized_transactions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
-                            )
-                        except ImportError:
-                            st.info("💡 Install openpyxl for Excel export: `pip install openpyxl`")
+                    # Rerun to update UI (remove processing messages and re-enable navigation)
+                    st.rerun()
                 
                 except Exception as e:
                     progress_bar.progress(100)
                     status_text.error(f"❌ Error: {str(e)}")
                     st.error(f"❌ Error: {str(e)}")
                     st.session_state.processing_status = "error"
+                    # Clear processing flag on error
+                    st.session_state.is_processing = False
+                    if 'processing_started' in st.session_state:
+                        del st.session_state.processing_started
+                    # Sync radio state with current page
+                    if "navigation_radio" in st.session_state:
+                        st.session_state.navigation_radio = st.session_state.current_page
+                    # Rerun to update UI (remove processing messages and re-enable navigation)
+                    st.rerun()
     
     with tab2:
         st.subheader("Process Single Transaction")
