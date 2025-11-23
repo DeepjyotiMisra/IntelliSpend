@@ -331,6 +331,7 @@ def update_merchant_seed_from_feedback(rebuild_index: bool = True) -> Dict[str, 
         
         new_patterns = []
         updated_merchants = set()
+        categories_updated = False  # Track if any categories were updated
         
         # Process each feedback record
         for idx, feedback in pending_feedback.iterrows():
@@ -347,12 +348,21 @@ def update_merchant_seed_from_feedback(rebuild_index: bool = True) -> Dict[str, 
             normalized_pattern = normalize_transaction_string(transaction_desc)
             
             # Check if this pattern already exists (check both transaction_pattern and description columns)
-            pattern_col = 'transaction_pattern' if 'transaction_pattern' in seed_df.columns else 'description'
-            
-            existing = seed_df[
-                (seed_df['merchant'] == corrected_merchant) &
-                (seed_df[pattern_col] == normalized_pattern)
-            ]
+            # Try transaction_pattern first, then description, to handle cases where one might be NaN
+            existing = pd.DataFrame()
+            if 'transaction_pattern' in seed_df.columns:
+                existing = seed_df[
+                    (seed_df['merchant'] == corrected_merchant) &
+                    (seed_df['transaction_pattern'].notna()) &
+                    (seed_df['transaction_pattern'] == normalized_pattern)
+                ]
+            # If not found in transaction_pattern, check description
+            if existing.empty and 'description' in seed_df.columns:
+                existing = seed_df[
+                    (seed_df['merchant'] == corrected_merchant) &
+                    (seed_df['description'].notna()) &
+                    (seed_df['description'] == normalized_pattern)
+                ]
             
             if existing.empty:
                 # Add new pattern - match the existing seed structure
@@ -361,12 +371,14 @@ def update_merchant_seed_from_feedback(rebuild_index: bool = True) -> Dict[str, 
                     'category': corrected_category,
                 }
                 
-                # Add the pattern column based on seed structure
+                # Add the pattern to BOTH columns if they both exist (for consistency)
+                # This ensures pattern matching works regardless of which column is checked
                 if 'description' in seed_df.columns:
                     new_pattern['description'] = normalized_pattern
-                elif 'transaction_pattern' in seed_df.columns:
+                if 'transaction_pattern' in seed_df.columns:
                     new_pattern['transaction_pattern'] = normalized_pattern
-                else:
+                # If neither exists, create transaction_pattern
+                if 'description' not in seed_df.columns and 'transaction_pattern' not in seed_df.columns:
                     new_pattern['transaction_pattern'] = normalized_pattern
                 
                 # Add sample_amount if column exists
@@ -383,20 +395,45 @@ def update_merchant_seed_from_feedback(rebuild_index: bool = True) -> Dict[str, 
                 
                 new_patterns.append(new_pattern)
                 updated_merchants.add(corrected_merchant)
-                logger.info(f"Adding new pattern: {corrected_merchant} - {normalized_pattern[:50]}")
+                logger.info(f"Adding new pattern: {corrected_merchant} - {normalized_pattern[:50]} → {corrected_category}")
+            else:
+                # Pattern exists - check if category needs to be updated
+                existing_category = str(existing.iloc[0].get('category', '')).strip()
+                existing_idx = existing.index[0]
+                
+                # Also ensure transaction_pattern is populated if it was NaN
+                if 'transaction_pattern' in seed_df.columns:
+                    if pd.isna(seed_df.loc[existing_idx, 'transaction_pattern']):
+                        seed_df.loc[existing_idx, 'transaction_pattern'] = normalized_pattern
+                        logger.debug(f"Populated missing transaction_pattern for existing pattern")
+                
+                if existing_category != corrected_category:
+                    # Update the category for existing pattern
+                    seed_df.loc[existing_idx, 'category'] = corrected_category
+                    updated_merchants.add(corrected_merchant)
+                    categories_updated = True  # Mark that categories were updated
+                    logger.info(f"Updating category for existing pattern: {corrected_merchant} - {normalized_pattern[:50]} → {existing_category} → {corrected_category}")
+                else:
+                    logger.debug(f"Pattern already exists with same category: {corrected_merchant} - {normalized_pattern[:50]} → {corrected_category}")
         
         # Add new patterns to seed
         if new_patterns:
             new_df = pd.DataFrame(new_patterns)
             seed_df = pd.concat([seed_df, new_df], ignore_index=True)
-            
-            # Remove duplicates
-            seed_df = seed_df.drop_duplicates(subset=['merchant', 'transaction_pattern'], keep='first')
-            
-            # Save updated seed
+        
+        # Remove duplicates (keep the last occurrence, which preserves category updates)
+        # This ensures that if we updated a category, the updated version is kept
+        pattern_col = 'transaction_pattern' if 'transaction_pattern' in seed_df.columns else 'description'
+        seed_df = seed_df.drop_duplicates(subset=['merchant', pattern_col], keep='last')
+        
+        # Save updated seed (even if no new patterns, category updates might have occurred)
+        if new_patterns or updated_merchants:
             seed_path.parent.mkdir(parents=True, exist_ok=True)
             seed_df.to_csv(seed_path, index=False)
-            logger.info(f"Updated merchant seed: Added {len(new_patterns)} new patterns")
+            if new_patterns:
+                logger.info(f"Updated merchant seed: Added {len(new_patterns)} new patterns")
+            if updated_merchants:
+                logger.info(f"Updated merchant seed: Updated categories for {len(updated_merchants)} merchants")
         
         # Mark feedback as processed
         feedback_path = Path(settings.FEEDBACK_STORAGE_PATH)
@@ -406,9 +443,16 @@ def update_merchant_seed_from_feedback(rebuild_index: bool = True) -> Dict[str, 
             df.to_csv(feedback_path, index=False)
             logger.info(f"Marked {len(pending_feedback)} feedback records as processed")
         
-        # Rebuild FAISS index if requested
-        if rebuild_index and new_patterns:
-            logger.info("Rebuilding FAISS index with new patterns...")
+        # Rebuild FAISS index if requested (when new patterns added OR categories updated)
+        # Categories are stored in FAISS metadata, so we need to rebuild when they change
+        if rebuild_index and (new_patterns or categories_updated):
+            if categories_updated and not new_patterns:
+                logger.info("Rebuilding FAISS index due to category updates...")
+            elif new_patterns and categories_updated:
+                logger.info("Rebuilding FAISS index with new patterns and category updates...")
+            else:
+                logger.info("Rebuilding FAISS index with new patterns...")
+            
             import subprocess
             import sys
             result = subprocess.run(
@@ -418,14 +462,33 @@ def update_merchant_seed_from_feedback(rebuild_index: bool = True) -> Dict[str, 
             )
             if result.returncode == 0:
                 logger.info("FAISS index rebuilt successfully")
+                # Reload the retriever singleton to use the updated index
+                try:
+                    from utils.faiss_retriever import reload_retriever
+                    reload_retriever()
+                    logger.info("FAISS retriever reloaded with updated index")
+                except Exception as e:
+                    logger.warning(f"Could not reload FAISS retriever: {e}. "
+                                 "The retriever will use the old index until the application restarts.")
             else:
                 logger.warning(f"FAISS index rebuild had issues: {result.stderr}")
         
+        # Build message based on what was updated
+        if new_patterns and categories_updated:
+            message = f"Updated merchant seed: Added {len(new_patterns)} new patterns and updated categories for {len(updated_merchants)} merchants"
+        elif new_patterns:
+            message = f"Updated merchant seed with {len(new_patterns)} new patterns"
+        elif categories_updated:
+            message = f"Updated categories for {len(updated_merchants)} merchants"
+        else:
+            message = "No updates needed"
+        
         return {
             "success": True,
-            "message": f"Updated merchant seed with {len(new_patterns)} new patterns",
+            "message": message,
             "new_patterns": len(new_patterns),
             "updated_merchants": len(updated_merchants),
+            "categories_updated": categories_updated,  # Include flag in response
             "merchants": list(updated_merchants)
         }
     

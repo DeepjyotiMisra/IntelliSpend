@@ -7,8 +7,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-from agno.models.google import Gemini
 from agno.tools import Toolkit
 from typing import Dict, Any, Optional
 import os
@@ -22,6 +20,23 @@ logger = logging.getLogger(__name__)
 
 # Load environment configuration
 load_dotenv(Path(__file__).parent.parent / '.env')
+
+# Lazy imports for LLM models (only import when needed)
+def _import_openai():
+    """Lazy import OpenAI model"""
+    try:
+        from agno.models.openai import OpenAIChat
+        return OpenAIChat
+    except ImportError as e:
+        raise ImportError(f"OpenAI model not available: {e}. Install with: pip install agno[openai]")
+
+def _import_gemini():
+    """Lazy import Gemini model"""
+    try:
+        from agno.models.google import Gemini
+        return Gemini
+    except ImportError as e:
+        raise ImportError(f"Gemini model not available: {e}. Install with: pip install google-genai")
 
 
 def create_feedback_agent() -> Agent:
@@ -51,6 +66,7 @@ def create_feedback_agent() -> Agent:
     provider = os.getenv('FEEDBACK_MODEL_PROVIDER', 'gemini').lower()
     
     if provider == 'gemini':
+        Gemini = _import_gemini()  # Lazy import
         api_key = os.getenv('GOOGLE_API_KEY')
         model_name = os.getenv('GEMINI_MODEL_NAME', 'gemini-2.0-flash')
         if not api_key:
@@ -64,6 +80,7 @@ def create_feedback_agent() -> Agent:
             api_key=api_key
         )
     elif provider == 'openai':
+        OpenAIChat = _import_openai()  # Lazy import
         api_key = os.getenv('OPENAI_API_KEY')
         model_name = os.getenv('MODEL_NAME', 'gpt-4o-mini')
         azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')

@@ -127,7 +127,7 @@ def process_single_transaction(description: str, amount: float = None, date: str
         normalized = preprocess_result.get('normalized', description)
         payment_mode = preprocess_result.get('payment_mode', 'UNKNOWN')
         
-        # Step 2: Retrieve similar merchants
+        # Step 2: Retrieve similar merchants (Similarity-based classification)
         # Use a lower threshold for initial matching, then filter by confidence
         retrieve_result = retrieve_similar_merchants(normalized, top_k=3, min_score=None)
         
@@ -135,50 +135,95 @@ def process_single_transaction(description: str, amount: float = None, date: str
         best_match = retrieve_result.get('best_match')
         all_matches = retrieve_result.get('results', [])
         
-        # Step 3: Classification
-        # Automatically use Classifier Agent for low-confidence matches
-        confidence_score = best_match.get('score', 0.0) if best_match else 0.0
-        should_use_agent = confidence_score < settings.CLASSIFIER_AGENT_THRESHOLD
+        # Step 3: Classification Pipeline
+        # Order: Similarity → Rule-based → LLM
         
-        if should_use_agent:
-            # Use Classifier Agent for low-confidence matches
-            logger.info(f"Using Classifier Agent for low-confidence match (score: {confidence_score:.3f})")
-            # Note: Progress logging happens at batch level, not per transaction to avoid spam
+        # 3a. Check similarity-based classification first (fast path)
+        confidence_score = best_match.get('score', 0.0) if best_match else 0.0
+        
+        # High confidence similarity match - use directly
+        if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
+            merchant = best_match.get('merchant', 'UNKNOWN')
+            category = best_match.get('category', 'Other')
+            confidence = confidence_score
+            match_quality = 'high'
+            classification_source = 'similarity'
+        else:
+            # 3b. Try rule-based classification (medium speed, no LLM needed)
+            rule_result = None
             try:
-                from agents.classifier_agent import classify_transaction as agent_classify
-                agent_response = agent_classify(
-                    description=description,
-                    amount=amount,
-                    payment_mode=payment_mode,
-                    retrieved_merchants=all_matches
-                )
-                
-                # Parse agent response
-                agent_result = parse_classifier_response(agent_response)
-                merchant = agent_result.get('merchant', 'UNKNOWN')
-                category = agent_result.get('category', 'Other')
-                agent_confidence = agent_result.get('confidence', 'medium')
-                
-                # Map confidence text to score
-                confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
-                confidence = confidence_map.get(agent_confidence, confidence_score)
-                match_quality = 'agent_llm'
-                classification_source = 'llm'
-                
+                from agents.classifier_agent import apply_rule_based_classification
+                rule_result = apply_rule_based_classification(description, amount)
             except Exception as e:
-                logger.warning(f"Classifier Agent failed, falling back to direct classification: {e}")
-                # Fallback to direct classification
-                if best_match:
-                    merchant = best_match.get('merchant', 'UNKNOWN')
-                    category = best_match.get('category', 'Other')
-                    confidence = best_match.get('score', 0.0)
-                    match_quality = 'low'
+                logger.debug(f"Rule-based classification not available: {e}")
+            
+            if rule_result:
+                # Rule-based match found
+                merchant = rule_result.get('merchant', 'UNKNOWN')
+                category = rule_result.get('category', 'Other')
+                rule_confidence = rule_result.get('confidence', 'medium')
+                confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
+                confidence = confidence_map.get(rule_confidence, 0.70)
+                match_quality = 'rule_based'
+                classification_source = 'rule_based'
+            else:
+                # 3c. Fall back to LLM classification (slower, but most accurate)
+                should_use_agent = confidence_score < settings.CLASSIFIER_AGENT_THRESHOLD
+                
+                if should_use_agent:
+                    # Use Classifier Agent for low-confidence matches
+                    logger.info(f"Using Classifier Agent for low-confidence match (score: {confidence_score:.3f})")
+                    # Note: Progress logging happens at batch level, not per transaction to avoid spam
+                    try:
+                        from agents.classifier_agent import classify_transaction as agent_classify
+                        agent_response = agent_classify(
+                            description=description,
+                            amount=amount,
+                            payment_mode=payment_mode,
+                            retrieved_merchants=all_matches
+                        )
+                        
+                        # Parse agent response
+                        agent_result = parse_classifier_response(agent_response)
+                        merchant = agent_result.get('merchant', 'UNKNOWN')
+                        category = agent_result.get('category', 'Other')
+                        agent_confidence = agent_result.get('confidence', 'medium')
+                        
+                        # Map confidence text to score
+                        confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
+                        confidence = confidence_map.get(agent_confidence, confidence_score)
+                        match_quality = 'agent_llm'
+                        classification_source = 'llm'
+                    
+                    except Exception as e:
+                        logger.warning(f"Classifier Agent failed, falling back to direct classification: {e}")
+                        # Fallback to direct classification
+                        if best_match:
+                            merchant = best_match.get('merchant', 'UNKNOWN')
+                            category = best_match.get('category', 'Other')
+                            confidence = best_match.get('score', 0.0)
+                            match_quality = 'low'
+                            classification_source = 'similarity_fallback'
+                        else:
+                            merchant = 'UNKNOWN'
+                            category = 'Other'
+                            confidence = 0.0
+                            match_quality = 'none'
+                            classification_source = 'default'
                 else:
-                    merchant = 'UNKNOWN'
-                    category = 'Other'
-                    confidence = 0.0
-                    match_quality = 'none'
-                classification_source = 'direct_fallback'
+                    # No rule match and low similarity - use best match or default
+                    if best_match:
+                        merchant = best_match.get('merchant', 'UNKNOWN')
+                        category = best_match.get('category', 'Other')
+                        confidence = confidence_score
+                        match_quality = 'low'
+                        classification_source = 'similarity_low'
+                    else:
+                        merchant = 'UNKNOWN'
+                        category = 'Other'
+                        confidence = 0.0
+                        match_quality = 'none'
+                        classification_source = 'default'
         else:
             # Direct classification (fast path) - high confidence
             if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
@@ -446,7 +491,10 @@ def process_batch_transactions(descriptions: List[str],
     if progress_callback:
         progress_callback(0, total, 12.5, 0, 0, "🔄 Loading FAISS index...")
     
-    retriever = get_retriever(top_k=3)
+    # Get retriever - auto-reloads if index was modified (e.g., after feedback)
+    # This ensures we always use the latest index with updated categories
+    retriever = get_retriever(top_k=3, force_reload=False)  # Auto-reload check happens inside get_retriever
+    logger.info("FAISS retriever initialized - using latest index")
     
     # Update progress: Retriever initialized (15%)
     if progress_callback:
@@ -858,6 +906,32 @@ def process_transactions_file(input_file: str = 'data/raw_transactions.csv',
     # Drop duplicate column
     if 'original_description' in output_df.columns:
         output_df = output_df.drop(columns=['original_description'])
+    
+    # Fix duplicate category columns from merge (category_x vs category_y)
+    # Keep category_y (from results) and drop category_x (from input), then rename to category
+    if 'category_y' in output_df.columns:
+        if 'category_x' in output_df.columns:
+            output_df = output_df.drop(columns=['category_x'])
+        output_df = output_df.rename(columns={'category_y': 'category'})
+    elif 'category_x' in output_df.columns:
+        # If only category_x exists, rename it to category
+        output_df = output_df.rename(columns={'category_x': 'category'})
+    
+    # Fix duplicate merchant columns from merge
+    if 'merchant_y' in output_df.columns:
+        if 'merchant_x' in output_df.columns:
+            output_df = output_df.drop(columns=['merchant_x'])
+        output_df = output_df.rename(columns={'merchant_y': 'merchant'})
+    elif 'merchant_x' in output_df.columns:
+        output_df = output_df.rename(columns={'merchant_x': 'merchant'})
+    
+    # Fix duplicate payment_mode columns from merge
+    if 'payment_mode_y' in output_df.columns:
+        if 'payment_mode_x' in output_df.columns:
+            output_df = output_df.drop(columns=['payment_mode_x'])
+        output_df = output_df.rename(columns={'payment_mode_y': 'payment_mode'})
+    elif 'payment_mode_x' in output_df.columns:
+        output_df = output_df.rename(columns={'payment_mode_x': 'payment_mode'})
     
     # Normalize column names to lowercase for consistency
     # This ensures the output always has consistent column names regardless of input

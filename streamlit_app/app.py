@@ -531,6 +531,16 @@ def show_process_transactions():
                     progress_bar.progress(0.05)
                     
                     # Process transactions with real-time progress updates
+                    # Ensure retriever is reloaded before batch processing to use latest index
+                    # This is critical after applying feedback - ensures updated categories are used
+                    try:
+                        from utils.faiss_retriever import get_retriever
+                        get_retriever(force_reload=False)  # Auto-reloads if index modified
+                        # Retriever will auto-reload if index was modified
+                    except Exception as e:
+                        # Silently continue - get_retriever() will handle errors internally
+                        pass
+                    
                     result_df = process_transactions_file(
                         input_file=str(temp_path),
                         output_file=output_path,
@@ -610,6 +620,18 @@ def show_process_transactions():
                         import os
                         os.environ['CLASSIFIER_MODEL_PROVIDER'] = st.session_state.llm_provider
                         
+                        # Ensure retriever is up-to-date (force reload to ensure latest index is used)
+                        from utils.faiss_retriever import get_retriever
+                        retriever = get_retriever(force_reload=False)  # Auto-reloads if index modified
+                        # Double-check: if index was just rebuilt, force reload
+                        # Note: Path is already imported at module level, don't re-import
+                        index_path = Path(settings.FAISS_INDEX_PATH)
+                        if index_path.exists() and hasattr(retriever, '_load_time'):
+                            index_mtime = index_path.stat().st_mtime
+                            if retriever._load_time < index_mtime:
+                                # Index was modified after retriever was loaded, force reload
+                                retriever = get_retriever(force_reload=True)
+                        
                         result = process_single_transaction(
                             description=description,
                             amount=float(amount) if amount else None,
@@ -617,7 +639,11 @@ def show_process_transactions():
                         )
                         
                         # Display results
-                        st.success("✅ Classification Complete!")
+                        classification_source = result.get('classification_source', 'unknown')
+                        if classification_source == 'llm':
+                            st.success("✅ Classification Complete! (Using LLM)")
+                        else:
+                            st.success("✅ Classification Complete!")
                         
                         col1, col2, col3 = st.columns(3)
                         with col1:
@@ -634,10 +660,26 @@ def show_process_transactions():
                         col1, col2 = st.columns(2)
                         with col1:
                             st.write("**Processing Info:**")
-                            st.write(f"- Classification Source: {result.get('classification_source', 'N/A')}")
-                            st.write(f"- Match Quality: {result.get('match_quality', 'N/A')}")
+                            classification_source = result.get('classification_source', 'N/A')
+                            match_quality = result.get('match_quality', 'N/A')
+                            confidence_score = result.get('confidence_score', 0.0)
+                            
+                            # Highlight LLM usage
+                            if classification_source == 'llm':
+                                st.success(f"🤖 **LLM Classification** (Confidence: {confidence_score:.3f} < threshold: 0.65)")
+                            elif classification_source == 'direct_fallback':
+                                st.warning(f"⚠️ **LLM Failed, Using Fallback** (Confidence: {confidence_score:.3f})")
+                            else:
+                                st.info(f"⚡ **Direct Classification** (Confidence: {confidence_score:.3f} ≥ threshold: 0.65)")
+                            
+                            st.write(f"- Classification Source: {classification_source}")
+                            st.write(f"- Match Quality: {match_quality}")
                             st.write(f"- Payment Mode: {result.get('payment_mode', 'N/A')}")
                             st.write(f"- Matches Found: {result.get('num_matches', 0)}")
+                            
+                            # Show threshold info
+                            if classification_source != 'llm' and confidence_score >= 0.65:
+                                st.caption(f"💡 LLM is used when confidence < 0.65. Current: {confidence_score:.3f}")
                         
                         with col2:
                             st.write("**Retrieved Merchants:**")
@@ -735,7 +777,10 @@ def show_process_transactions():
                             
                             st.write("**Original Classification:**")
                             st.write(f"- **Merchant:** {result.get('merchant', 'N/A')}")
-                            st.write(f"- **Category:** {result.get('category', 'N/A')}")
+                            category = result.get('category', 'N/A')
+                            if not category or str(category).strip() == '' or str(category).lower() == 'nan':
+                                category = 'N/A'
+                            st.write(f"- **Category:** {category}")
                             st.write(f"- **Confidence:** {result.get('confidence_score', 0):.2f}")
                             
                             st.divider()
@@ -884,6 +929,29 @@ def show_process_transactions():
                         
                     except Exception as e:
                         st.error(f"❌ Error: {str(e)}")
+                        import traceback
+                        error_details = traceback.format_exc()
+                        with st.expander("🔍 Error Details"):
+                            st.code(error_details)
+                        
+                        # Check if it's an LLM-related error
+                        error_str = str(e).lower()
+                        if any(keyword in error_str for keyword in ['classifier', 'llm', 'agent', 'openai', 'gemini', 'api']):
+                            st.warning("💡 LLM Classification Error - Check:")
+                            st.info("""
+                            **Possible Issues:**
+                            - **API Key**: Ensure OPENAI_API_KEY or GOOGLE_API_KEY is set correctly
+                            - **Provider**: Check Configuration page - LLM provider must match your API key
+                            - **Model**: Verify model name is correct for your provider
+                            - **Network**: Check if API endpoint is accessible
+                            - **Rate Limits**: You may have hit API rate limits
+                            
+                            **Quick Fix:**
+                            1. Go to Configuration page
+                            2. Verify your LLM provider matches your API key
+                            3. Check API key is valid
+                            4. Try again
+                            """)
             else:
                 st.warning("Please enter a transaction description")
 
@@ -951,13 +1019,26 @@ def show_review_feedback():
     st.subheader("Transaction Details & Feedback")
     
     for idx, row in filtered_df.iterrows():
-        with st.expander(f"📝 {row.get('description', 'N/A')[:60]}... | {row.get('merchant', 'N/A')} / {row.get('category', 'N/A')} (Conf: {row.get('confidence_score', 0):.2f})"):
+        # Handle category display - check multiple possible column names
+        category_display = row.get('category', row.get('category_y', row.get('category_x', 'N/A')))
+        if pd.isna(category_display) or str(category_display).strip() == '' or str(category_display).lower() == 'nan':
+            category_display = 'N/A'
+        else:
+            category_display = str(category_display).strip()
+        
+        with st.expander(f"📝 {row.get('description', 'N/A')[:60]}... | {row.get('merchant', 'N/A')} / {category_display} (Conf: {row.get('confidence_score', 0):.2f})"):
             col1, col2 = st.columns(2)
             
             with col1:
                 st.write("**Original Classification:**")
                 st.write(f"- **Merchant:** {row.get('merchant', 'N/A')}")
-                st.write(f"- **Category:** {row.get('category', 'N/A')}")
+                # Handle category display - check multiple possible column names
+                category_display = row.get('category', row.get('category_y', row.get('category_x', 'N/A')))
+                if pd.isna(category_display) or str(category_display).strip() == '' or str(category_display).lower() == 'nan':
+                    category_display = 'N/A'
+                else:
+                    category_display = str(category_display).strip()
+                st.write(f"- **Category:** {category_display}")
                 st.write(f"- **Confidence:** {row.get('confidence_score', 0):.2f}")
                 st.write(f"- **Source:** {row.get('classification_source', 'N/A')}")
                 st.write(f"- **Match Quality:** {row.get('match_quality', 'N/A')}")
@@ -990,7 +1071,13 @@ def show_review_feedback():
                 
                 # Category selection with custom category option
                 categories = get_categories()
-                default_idx = categories.index(row.get('category', 'Other')) if row.get('category', 'Other') in categories else 0
+                # Handle category - check multiple possible column names
+                row_category = row.get('category', row.get('category_y', row.get('category_x', 'Other')))
+                if pd.isna(row_category) or str(row_category).strip() == '' or str(row_category).lower() == 'nan':
+                    row_category = 'Other'
+                else:
+                    row_category = str(row_category).strip()
+                default_idx = categories.index(row_category) if row_category in categories else 0
                 
                 # Add "Create Custom Category..." option
                 category_options = categories + ["➕ Create Custom Category..."]
@@ -1083,7 +1170,7 @@ def show_review_feedback():
                             'original_description': row.get('description', row.get('original_description', '')),
                             'normalized_description': row.get('normalized_description', row.get('description', '')),
                             'merchant': row.get('merchant', 'UNKNOWN'),
-                            'category': row.get('category', 'Other'),
+                            'category': row.get('category', row.get('category_y', row.get('category_x', 'Other'))),
                             'amount': row.get('amount'),
                             'date': row.get('date'),
                             'confidence_score': row.get('confidence_score', 0.0),
@@ -1532,12 +1619,16 @@ def show_apply_feedback():
                                     transaction = 'N/A'
                                 
                                 original_cat = row.get('original_category', 'N/A')
-                                if pd.isna(original_cat):
+                                if pd.isna(original_cat) or str(original_cat).strip() == '' or str(original_cat).lower() == 'nan':
                                     original_cat = 'N/A'
+                                else:
+                                    original_cat = str(original_cat).strip()
                                 
                                 corrected_cat = row.get('corrected_category', 'N/A')
-                                if pd.isna(corrected_cat):
+                                if pd.isna(corrected_cat) or str(corrected_cat).strip() == '' or str(corrected_cat).lower() == 'nan':
                                     corrected_cat = 'N/A'
+                                else:
+                                    corrected_cat = str(corrected_cat).strip()
                                 
                                 original_merchant = row.get('original_merchant', 'N/A')
                                 if pd.isna(original_merchant):
@@ -1683,9 +1774,18 @@ def show_apply_feedback():
                     progress_bar.progress(60)
                     
                     if result.get('success'):
-                        # Step 3: Rebuild FAISS index
-                        if result.get('new_patterns', 0) > 0:
-                            status_text.info("🔨 Rebuilding FAISS index with new patterns...")
+                        # Step 3: Rebuild FAISS index if new patterns added OR categories updated
+                        # Categories are stored in FAISS metadata, so index must be rebuilt when they change
+                        new_patterns = result.get('new_patterns', 0)
+                        categories_updated = result.get('categories_updated', False)
+                        
+                        if new_patterns > 0 or categories_updated:
+                            if categories_updated and new_patterns == 0:
+                                status_text.info("🔨 Rebuilding FAISS index due to category updates...")
+                            elif new_patterns > 0 and categories_updated:
+                                status_text.info("🔨 Rebuilding FAISS index with new patterns and category updates...")
+                            else:
+                                status_text.info("🔨 Rebuilding FAISS index with new patterns...")
                             progress_bar.progress(70)
                             
                             import subprocess
@@ -1700,18 +1800,89 @@ def show_apply_feedback():
                             
                             if rebuild_result.returncode == 0:
                                 status_text.success("✅ FAISS index rebuilt successfully!")
+                                # Reload the retriever singleton to use the updated index
+                                try:
+                                    from utils.faiss_retriever import reload_retriever
+                                    reload_retriever()
+                                    status_text.success("✅ FAISS retriever reloaded with updated index!")
+                                except Exception as e:
+                                    status_text.warning(f"⚠️ Could not reload FAISS retriever: {str(e)[:100]}")
                             else:
                                 status_text.warning(f"⚠️ FAISS index rebuild had issues: {rebuild_result.stderr[:200]}")
+                        else:
+                            # Even if no rebuild, ensure retriever is up-to-date
+                            try:
+                                from utils.faiss_retriever import get_retriever
+                                get_retriever()  # This will auto-reload if index was modified
+                                status_text.info("ℹ️ No index rebuild needed, but verified retriever is up-to-date")
+                            except Exception as e:
+                                status_text.warning(f"⚠️ Could not verify retriever: {str(e)[:100]}")
                         
                         progress_bar.progress(100)
                         status_text.success("✅ Feedback applied and index rebuilt successfully!")
                         
                         st.success(f"✅ {result.get('message')}")
-                        st.metric("New Patterns Added", result.get('new_patterns', 0))
-                        st.metric("Updated Merchants", result.get('updated_merchants', 0))
-                        if result.get('new_patterns', 0) > 0:
-                            st.info("💡 FAISS index has been rebuilt with new patterns")
+                        
+                        # Show metrics with before/after counts
+                        new_patterns = result.get('new_patterns', 0)
+                        updated_merchants = result.get('updated_merchants', 0)
+                        
+                        # Get current merchant seed count for display
+                        try:
+                            seed_path = Path(settings.MERCHANT_SEED_PATH)
+                            if seed_path.exists():
+                                seed_df = pd.read_csv(seed_path)
+                                current_count = len(seed_df)
+                                previous_count = current_count - new_patterns
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric(
+                                        "Merchant Seed Records", 
+                                        current_count,
+                                        delta=new_patterns if new_patterns > 0 else None,
+                                        help=f"Previous: {previous_count}, Added: {new_patterns}"
+                                    )
+                                with col2:
+                                    st.metric("New Patterns Added", new_patterns)
+                                with col3:
+                                    st.metric("Updated Merchants", updated_merchants)
+                            else:
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("New Patterns Added", new_patterns)
+                                with col2:
+                                    st.metric("Updated Merchants", updated_merchants)
+                        except Exception as e:
+                            st.metric("New Patterns Added", new_patterns)
+                            st.metric("Updated Merchants", updated_merchants)
+                            st.warning(f"Could not load merchant seed count: {e}")
+                        
+                        if new_patterns > 0:
+                            st.info(f"💡 Added {new_patterns} new pattern(s) to merchant seed. FAISS index has been rebuilt.")
+                        elif categories_updated:
+                            st.info(f"💡 Updated categories for {updated_merchants} merchant(s). FAISS index has been rebuilt with updated categories.")
+                        else:
+                            st.info("💡 No new patterns added (may be duplicates or already exist)")
+                        
+                        # Important: Force reload retriever after page refresh
+                        st.info("🔄 **Please refresh the page or process a new transaction to see the updated category.**")
+                        
                         st.balloons()
+                        
+                        # IMPORTANT: Force reload retriever BEFORE page refresh to ensure updated index is used
+                        # The retriever singleton needs to be reloaded so subsequent queries use the updated category
+                        try:
+                            from utils.faiss_retriever import reload_retriever
+                            reload_retriever()
+                            st.success("🔄 Retriever reloaded - updated categories will be used in next classification!")
+                            
+                            # Also clear any cached results in session state that might interfere
+                            if 'last_classification_result' in st.session_state:
+                                del st.session_state['last_classification_result']
+                        except Exception as e:
+                            st.warning(f"⚠️ Could not reload retriever: {str(e)[:100]}")
+                            st.info("💡 Please restart the Streamlit app to ensure updated categories are used")
                         
                         # Refresh the page after a brief delay to show updated data
                         time.sleep(2)
@@ -1835,6 +2006,10 @@ def show_custom_categories():
                                         if st.button("🤖 Reclassify with LLM", key=f"reclassify_{cat['name']}"):
                                             st.info("Reclassifying with LLM...")
                                             reclassified = 0
+                                            
+                                            # Ensure retriever is up-to-date before reclassifying
+                                            from utils.faiss_retriever import get_retriever
+                                            get_retriever()  # Auto-reloads if index modified
                                             
                                             progress_bar = st.progress(0)
                                             for i, (_, row) in enumerate(affected_df.iterrows()):

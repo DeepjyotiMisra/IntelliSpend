@@ -44,6 +44,7 @@ class FAISSRetriever:
         
         self.index: Optional[faiss.Index] = None
         self.metadata: List[Dict[str, Any]] = []
+        self._load_time: float = 0.0  # Track when index was loaded
         
         # Load index if it exists
         if self.index_path.exists() and self.metadata_path.exists():
@@ -78,6 +79,9 @@ class FAISSRetriever:
         # Validate metadata structure
         if not isinstance(self.metadata, list):
             raise ValueError("Metadata should be a list of dicts")
+        
+        # Store load time for comparison with file modification time
+        self._load_time = self.index_path.stat().st_mtime
         
         total_load_time = time.time() - start_time
         logger.info(
@@ -279,6 +283,15 @@ class FAISSRetriever:
         """Check if index is loaded"""
         return self.index is not None
     
+    def reload_index(self) -> None:
+        """
+        Reload the FAISS index and metadata from disk.
+        Use this after the index has been rebuilt to ensure you're using the latest version.
+        """
+        logger.info("Reloading FAISS index from disk...")
+        self._load_index()
+        logger.info("Index reloaded successfully")
+    
     def get_index_stats(self) -> Dict[str, Any]:
         """Get statistics about the loaded index"""
         if self.index is None:
@@ -300,7 +313,8 @@ _retriever: Optional[FAISSRetriever] = None
 
 def get_retriever(index_path: Optional[str] = None,
                  metadata_path: Optional[str] = None,
-                 top_k: int = 5) -> FAISSRetriever:
+                 top_k: int = 5,
+                 force_reload: bool = False) -> FAISSRetriever:
     """
     Get or create the global retriever instance.
     
@@ -308,19 +322,78 @@ def get_retriever(index_path: Optional[str] = None,
         index_path: Optional index path override
         metadata_path: Optional metadata path override
         top_k: Default number of results
+        force_reload: If True, reload the retriever even if it exists (useful after index rebuild)
         
     Returns:
         FAISSRetriever instance
     """
     global _retriever
     
-    if _retriever is None:
+    # Check if we need to reload due to index file modification
+    if _retriever is not None and not force_reload:
+        # Check if index file was modified after retriever was loaded
+        actual_index_path = Path(index_path or settings.FAISS_INDEX_PATH)
+        if actual_index_path.exists():
+            try:
+                index_mtime = actual_index_path.stat().st_mtime
+                # If retriever was loaded before index was modified, reload it
+                retriever_load_time = getattr(_retriever, '_load_time', 0)
+                if not hasattr(_retriever, '_load_time') or retriever_load_time < index_mtime:
+                    logger.info(f"Index file modified after retriever load (index_mtime={index_mtime}, load_time={retriever_load_time}), reloading retriever...")
+                    force_reload = True
+            except (OSError, AttributeError) as e:
+                logger.warning(f"Could not check index modification time: {e}, forcing reload")
+                force_reload = True
+    
+    if _retriever is None or force_reload:
         _retriever = FAISSRetriever(
             index_path=index_path,
             metadata_path=metadata_path,
             top_k=top_k
         )
+        # Store load time for comparison
+        if _retriever.index_path.exists():
+            _retriever._load_time = _retriever.index_path.stat().st_mtime
+        else:
+            _retriever._load_time = 0
     
+    return _retriever
+
+
+def reload_retriever(index_path: Optional[str] = None,
+                    metadata_path: Optional[str] = None,
+                    top_k: int = 5) -> FAISSRetriever:
+    """
+    Reload the global retriever instance (clears cache and reloads from disk).
+    Use this after rebuilding the FAISS index to ensure the retriever uses the updated index.
+    
+    Args:
+        index_path: Optional index path override
+        metadata_path: Optional metadata path override
+        top_k: Default number of results
+        
+    Returns:
+        Newly loaded FAISSRetriever instance
+    """
+    global _retriever
+    
+    logger.info("Reloading FAISS retriever (clearing cache and reloading index from disk)...")
+    _retriever = None  # Clear the cached instance
+    
+    # Create new instance which will load the updated index
+    _retriever = FAISSRetriever(
+        index_path=index_path,
+        metadata_path=metadata_path,
+        top_k=top_k
+    )
+    
+    # Store load time
+    if _retriever.index_path.exists():
+        _retriever._load_time = _retriever.index_path.stat().st_mtime
+    else:
+        _retriever._load_time = 0
+    
+    logger.info("FAISS retriever reloaded successfully")
     return _retriever
 
 

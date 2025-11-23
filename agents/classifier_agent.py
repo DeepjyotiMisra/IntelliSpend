@@ -7,8 +7,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-from agno.models.google import Gemini
 from agno.tools import Toolkit
 from typing import Dict, Any, Optional
 import os
@@ -17,11 +15,156 @@ import logging
 
 from config.settings import settings
 from agents.tools import retrieve_similar_merchants, get_taxonomy_categories
+import re
+from typing import Tuple, List
 
 logger = logging.getLogger(__name__)
 
 # Load environment configuration
 load_dotenv(Path(__file__).parent.parent / '.env')
+
+
+def _load_merchant_rules() -> Dict[str, str]:
+    """Load merchant-to-category mapping rules using regex patterns."""
+    return {
+        # Food & Dining
+        r'(?i)(mcdonald\'?s|mcdonalds|burger king|kfc|taco bell|subway|pizza|restaurant|cafe|starbucks|dunkin|zomato|swiggy|food|dining|biryani|darbar|kitchen|grill|deli)': 'Food & Dining',
+        r'(?i)(grocery|supermarket|walmart|target|safeway|kroger|whole foods|bigbasket|grofers|dmart|reliance fresh)': 'Food & Dining',
+        
+        # Transportation
+        r'(?i)(uber|lyft|ola|rapido|taxi|gas|shell|exxon|bp|chevron|mobil|parking|fuel|petrol|diesel|transport)': 'Transportation',
+        r'(?i)(airline|airport|flight|car rental|train|bus|metro|railway|irctc|makemytrip|goibibo)': 'Transportation',
+        
+        # Shopping
+        r'(?i)(amazon|flipkart|ajio|myntra|ebay|shop|store|retail|mall|clothing|fashion|apparel|shopping)': 'Shopping',
+        
+        # Entertainment
+        r'(?i)(netflix|spotify|hotstar|prime|disney|movie|theater|game|music|entertainment|streaming|cinema)': 'Entertainment',
+        
+        # Bills & Utilities
+        r'(?i)(electric|gas company|water|internet|phone|cable|utility|bsnl|airtel|jio|vi|vodafone|reliance|broadband)': 'Bills & Utilities',
+        
+        # Financial
+        r'(?i)(bank|atm|fee|interest|payment|transfer|loan|sbi|hdfc|icici|axis|kotak|upi|neft|imps|investment|mutual fund)': 'Financial',
+        
+        # Health & Medical
+        r'(?i)(hospital|doctor|medical|pharmacy|health|dental|apollo|fortis|max|pharmacy|chemist|medicine|clinic)': 'Health & Medical',
+        
+        # Home & Garden
+        r'(?i)(home depot|lowes|hardware|furniture|garden|repair|ikea|pepperfry|urban ladder|home improvement)': 'Home & Garden',
+        
+        # Travel
+        r'(?i)(hotel|booking|travel|trip|vacation|resort|airbnb|oyo|makemytrip|goibibo|travel)': 'Travel',
+        
+        # Education
+        r'(?i)(school|university|college|tuition|education|course|training|learning|edtech|byju|unacademy)': 'Education'
+    }
+
+
+def _load_description_rules() -> Dict[str, str]:
+    """Load description pattern rules."""
+    return {
+        r'(?i)(coffee|lunch|dinner|breakfast|meal|food|snack|beverage|drink)': 'Food & Dining',
+        r'(?i)(gas|fuel|gasoline|petrol|diesel|refuel)': 'Transportation',
+        r'(?i)(subscription|monthly|recurring|membership|premium)': 'Bills & Utilities',
+        r'(?i)(withdrawal|deposit|transfer|payment|transaction)': 'Financial',
+        r'(?i)(fee|charge|penalty|service charge)': 'Financial',
+        r'(?i)(refund|return|credit|cashback|reward)': 'Other',
+        r'(?i)(shopping|purchase|buy|order|delivery)': 'Shopping',
+        r'(?i)(movie|cinema|theater|ticket|show)': 'Entertainment'
+    }
+
+
+def _load_amount_rules() -> List[Tuple[float, float, str, float]]:
+    """Load amount-based classification rules."""
+    return [
+        # (min_amount, max_amount, category, confidence)
+        (0.99, 15.99, 'Food & Dining', 0.6),  # Small food purchases
+        (200, 1000, 'Shopping', 0.5),         # Medium shopping
+        (1000, float('inf'), 'Major Purchase', 0.4),  # Large purchases
+        (0.01, 5.00, 'Fees', 0.7),           # Small fees
+    ]
+
+
+def apply_rule_based_classification(description: str, amount: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """
+    Apply rule-based pattern classification before LLM.
+    
+    Classification order: Similarity → Rule-based → LLM
+    
+    Args:
+        description: Transaction description
+        amount: Transaction amount (optional)
+        
+    Returns:
+        Classification result if pattern matches, None otherwise
+    """
+    try:
+        merchant_rules = _load_merchant_rules()
+        description_rules = _load_description_rules()
+        amount_rules = _load_amount_rules()
+        
+        description_lower = description.lower()
+        
+        # Strategy 1: Check merchant name patterns
+        for pattern, category in merchant_rules.items():
+            if re.search(pattern, description_lower):
+                logger.debug(f"Rule-based merchant pattern match: {pattern} -> {category}")
+                return {
+                    "merchant": description.upper()[:50],  # Extract merchant from description
+                    "category": category,
+                    "confidence": "high",
+                    "reasoning": f"Matched merchant pattern: {pattern}",
+                    "method": "rule_based_merchant"
+                }
+        
+        # Strategy 2: Check description patterns
+        for pattern, category in description_rules.items():
+            if re.search(pattern, description_lower):
+                logger.debug(f"Rule-based description pattern match: {pattern} -> {category}")
+                return {
+                    "merchant": description.upper()[:50],
+                    "category": category,
+                    "confidence": "medium",
+                    "reasoning": f"Matched description pattern: {pattern}",
+                    "method": "rule_based_description"
+                }
+        
+        # Strategy 3: Check amount-based rules (if amount provided)
+        if amount is not None:
+            for min_amt, max_amt, category, conf in amount_rules:
+                if min_amt <= abs(amount) <= max_amt:
+                    logger.debug(f"Rule-based amount match: {amount} -> {category}")
+                    return {
+                        "merchant": description.upper()[:50],
+                        "category": category,
+                        "confidence": "medium" if conf >= 0.6 else "low",
+                        "reasoning": f"Matched amount range: ${min_amt}-${max_amt}",
+                        "method": "rule_based_amount"
+                    }
+        
+        return None  # No rule match found
+        
+    except Exception as e:
+        logger.error(f"Error in rule-based classification: {e}")
+        return None
+
+# Lazy imports for LLM models (only import when needed)
+def _import_openai():
+    """Lazy import OpenAI model"""
+    try:
+        from agno.models.openai import OpenAIChat
+        return OpenAIChat
+    except ImportError as e:
+        raise ImportError(f"OpenAI model not available: {e}. Install with: pip install agno[openai]")
+
+def _import_gemini():
+    """Lazy import Gemini model"""
+    try:
+        from agno.models.google import Gemini
+        return Gemini
+    except ImportError as e:
+        raise ImportError(f"Gemini model not available: {e}. Install with: pip install google-genai")
 
 
 def create_classifier_agent() -> Agent:
@@ -53,6 +196,7 @@ def create_classifier_agent() -> Agent:
     
     if provider == 'gemini':
         # Google Gemini configuration
+        Gemini = _import_gemini()  # Lazy import
         api_key = os.getenv('GOOGLE_API_KEY')
         model_name = os.getenv('GEMINI_MODEL_NAME', 'gemini-2.0-flash')
         
@@ -70,6 +214,7 @@ def create_classifier_agent() -> Agent:
         
     elif provider == 'openai':
         # OpenAI configuration (supports both Azure and direct OpenAI)
+        OpenAIChat = _import_openai()  # Lazy import
         api_key = os.getenv('OPENAI_API_KEY')
         model_name = os.getenv('MODEL_NAME', 'gpt-4o-mini')
         azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
