@@ -127,45 +127,50 @@ def process_single_transaction(description: str, amount: float = None, date: str
         normalized = preprocess_result.get('normalized', description)
         payment_mode = preprocess_result.get('payment_mode', 'UNKNOWN')
         
-        # Step 2: Retrieve similar merchants (Similarity-based classification)
-        # Use a lower threshold for initial matching, then filter by confidence
-        retrieve_result = retrieve_similar_merchants(normalized, top_k=3, min_score=None)
+        # Step 2: Classification Pipeline
+        # Order: Rule-based → Similarity → LLM (for fastest classification)
+        # Rule-based is fastest (regex, no embedding/FAISS), then similarity (FAISS), then LLM (API call)
         
-        # Extract best match
-        best_match = retrieve_result.get('best_match')
-        all_matches = retrieve_result.get('results', [])
+        # 2a. Try rule-based classification FIRST (fastest - no embedding/FAISS needed)
+        rule_result = None
+        try:
+            from agents.classifier_agent import apply_rule_based_classification
+            rule_result = apply_rule_based_classification(description, amount)
+        except Exception as e:
+            logger.debug(f"Rule-based classification not available: {e}")
         
-        # Step 3: Classification Pipeline
-        # Order: Similarity → Rule-based → LLM
+        # Initialize variables for similarity/LLM paths
+        retrieve_result = None
+        best_match = None
+        all_matches = []
+        confidence_score = 0.0
         
-        # 3a. Check similarity-based classification first (fast path)
-        confidence_score = best_match.get('score', 0.0) if best_match else 0.0
-        
-        # High confidence similarity match - use directly
-        if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
-            merchant = best_match.get('merchant', 'UNKNOWN')
-            category = best_match.get('category', 'Other')
-            confidence = confidence_score
-            match_quality = 'high'
-            classification_source = 'similarity'
+        if rule_result:
+            # Rule-based match found - use it (fastest path, skip FAISS entirely)
+            merchant = rule_result.get('merchant', 'UNKNOWN')
+            category = rule_result.get('category', 'Other')
+            rule_confidence = rule_result.get('confidence', 'medium')
+            confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
+            confidence = confidence_map.get(rule_confidence, 0.70)
+            match_quality = 'rule_based'
+            classification_source = 'rule_based'
         else:
-            # 3b. Try rule-based classification (medium speed, no LLM needed)
-            rule_result = None
-            try:
-                from agents.classifier_agent import apply_rule_based_classification
-                rule_result = apply_rule_based_classification(description, amount)
-            except Exception as e:
-                logger.debug(f"Rule-based classification not available: {e}")
+            # 2b. No rule match - try similarity-based classification (FAISS)
+            # Only do FAISS retrieval if rule-based didn't match (saves time)
+            retrieve_result = retrieve_similar_merchants(normalized, top_k=3, min_score=None)
             
-            if rule_result:
-                # Rule-based match found
-                merchant = rule_result.get('merchant', 'UNKNOWN')
-                category = rule_result.get('category', 'Other')
-                rule_confidence = rule_result.get('confidence', 'medium')
-                confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
-                confidence = confidence_map.get(rule_confidence, 0.70)
-                match_quality = 'rule_based'
-                classification_source = 'rule_based'
+            # Extract best match
+            best_match = retrieve_result.get('best_match')
+            all_matches = retrieve_result.get('results', [])
+            confidence_score = best_match.get('score', 0.0) if best_match else 0.0
+            
+            if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
+                # High confidence similarity match - use it
+                merchant = best_match.get('merchant', 'UNKNOWN')
+                category = best_match.get('category', 'Other')
+                confidence = confidence_score
+                match_quality = 'high'
+                classification_source = 'similarity'
             else:
                 # 3c. Fall back to LLM classification (slower, but most accurate)
                 should_use_agent = confidence_score < settings.CLASSIFIER_AGENT_THRESHOLD
@@ -224,24 +229,6 @@ def process_single_transaction(description: str, amount: float = None, date: str
                         confidence = 0.0
                         match_quality = 'none'
                         classification_source = 'default'
-        else:
-            # Direct classification (fast path) - high confidence
-            if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
-                merchant = best_match.get('merchant', 'UNKNOWN')
-                category = best_match.get('category', 'Other')
-                confidence = confidence_score
-                match_quality = 'high'
-            elif best_match:
-                merchant = best_match.get('merchant', 'UNKNOWN')
-                category = best_match.get('category', 'Other')
-                confidence = confidence_score
-                match_quality = 'low'
-            else:
-                merchant = 'UNKNOWN'
-                category = 'Other'
-                confidence = 0.0
-                match_quality = 'none'
-            classification_source = 'direct'
         
         result = {
             'original_description': description,
@@ -253,8 +240,8 @@ def process_single_transaction(description: str, amount: float = None, date: str
             'category': category,
             'confidence_score': confidence,
             'match_quality': match_quality,
-            'num_matches': retrieve_result.get('num_results', 0),
-            'retrieval_source': 'faiss' if retrieve_result.get('success') else 'none',
+            'num_matches': retrieve_result.get('num_results', 0) if retrieve_result else 0,
+            'retrieval_source': 'faiss' if retrieve_result and retrieve_result.get('success') else ('rule_based' if rule_result else 'none'),
             'classification_source': classification_source,
             'processing_status': 'success',
             'top_matches': all_matches[:3] if all_matches else []
