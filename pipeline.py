@@ -128,43 +128,20 @@ def process_single_transaction(description: str, amount: float = None, date: str
         payment_mode = preprocess_result.get('payment_mode', 'UNKNOWN')
         
         # Step 2: Classification Pipeline
-        # Order: Rule-based → Similarity → LLM (for fastest classification)
-        # Rule-based is fastest (regex, no embedding/FAISS), then similarity (FAISS), then LLM (API call)
+        # Order: Similarity → Rule-based → LLM
+        # IMPORTANT: Similarity FIRST to respect feedback-updated categories
+        # Rule-based is fallback for new/unknown merchants (fast, but uses hardcoded patterns)
         
-        # 2a. Try rule-based classification FIRST (fastest - no embedding/FAISS needed)
-        rule_result = None
-        try:
-            from agents.classifier_agent import apply_rule_based_classification
-            rule_result = apply_rule_based_classification(description, amount)
-        except Exception as e:
-            logger.debug(f"Rule-based classification not available: {e}")
+        # 2a. Try similarity-based classification FIRST (respects feedback updates)
+        retrieve_result = retrieve_similar_merchants(normalized, top_k=3, min_score=None)
         
-        # Initialize variables for similarity/LLM paths
-        retrieve_result = None
-        best_match = None
-        all_matches = []
-        confidence_score = 0.0
+        # Extract best match
+        best_match = retrieve_result.get('best_match')
+        all_matches = retrieve_result.get('results', [])
+        confidence_score = best_match.get('score', 0.0) if best_match else 0.0
         
-        if rule_result:
-            # Rule-based match found - use it (fastest path, skip FAISS entirely)
-            merchant = rule_result.get('merchant', 'UNKNOWN')
-            category = rule_result.get('category', 'Other')
-            rule_confidence = rule_result.get('confidence', 'medium')
-            confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
-            confidence = confidence_map.get(rule_confidence, 0.70)
-            match_quality = 'rule_based'
-            classification_source = 'rule_based'
-        else:
-            # 2b. No rule match - try similarity-based classification (FAISS)
-            # Only do FAISS retrieval if rule-based didn't match (saves time)
-            retrieve_result = retrieve_similar_merchants(normalized, top_k=3, min_score=None)
-            
-            # Extract best match
-            best_match = retrieve_result.get('best_match')
-            all_matches = retrieve_result.get('results', [])
-            confidence_score = best_match.get('score', 0.0) if best_match else 0.0
-            
-            if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
+        # High confidence similarity match - use it (respects feedback)
+        if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
                 # High confidence similarity match - use it
                 merchant = best_match.get('merchant', 'UNKNOWN')
                 category = best_match.get('category', 'Other')
@@ -172,8 +149,27 @@ def process_single_transaction(description: str, amount: float = None, date: str
                 match_quality = 'high'
                 classification_source = 'similarity'
             else:
-                # 3c. Fall back to LLM classification (slower, but most accurate)
-                should_use_agent = confidence_score < settings.CLASSIFIER_AGENT_THRESHOLD
+                # 2b. Low/no similarity match - try rule-based classification (fast fallback)
+                # Rule-based uses hardcoded patterns, so only use if similarity didn't match
+                rule_result = None
+                try:
+                    from agents.classifier_agent import apply_rule_based_classification
+                    rule_result = apply_rule_based_classification(description, amount)
+                except Exception as e:
+                    logger.debug(f"Rule-based classification not available: {e}")
+                
+                if rule_result:
+                    # Rule-based match found - use it (fast fallback for new merchants)
+                    merchant = rule_result.get('merchant', 'UNKNOWN')
+                    category = rule_result.get('category', 'Other')
+                    rule_confidence = rule_result.get('confidence', 'medium')
+                    confidence_map = {'high': 0.85, 'medium': 0.70, 'low': 0.50}
+                    confidence = confidence_map.get(rule_confidence, 0.70)
+                    match_quality = 'rule_based'
+                    classification_source = 'rule_based'
+                else:
+                    # 2c. Fall back to LLM classification (slower, but most accurate)
+                    should_use_agent = confidence_score < settings.CLASSIFIER_AGENT_THRESHOLD
                 
                 if should_use_agent:
                     # Use Classifier Agent for low-confidence matches
