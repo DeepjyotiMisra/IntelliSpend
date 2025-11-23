@@ -246,8 +246,14 @@ def show_dashboard():
         st.metric("Avg Confidence", f"{avg_confidence:.2f}")
     
     with col4:
-        llm_count = (df['classification_source'] == 'llm').sum() if 'classification_source' in df.columns else 0
-        st.metric("LLM Classifications", llm_count)
+        if 'classification_source' in df.columns:
+            llm_count = (df['classification_source'] == 'llm').sum()
+            rule_based_count = (df['classification_source'] == 'rule_based').sum()
+            similarity_count = (df['classification_source'] == 'similarity').sum()
+            st.metric("LLM Classifications", llm_count)
+            st.caption(f"Rule-based: {rule_based_count} | Similarity: {similarity_count}")
+        else:
+            st.metric("LLM Classifications", 0)
     
     st.divider()
     
@@ -642,6 +648,10 @@ def show_process_transactions():
                         classification_source = result.get('classification_source', 'unknown')
                         if classification_source == 'llm':
                             st.success("✅ Classification Complete! (Using LLM)")
+                        elif classification_source == 'rule_based':
+                            st.success("✅ Classification Complete! (Using Rule-Based Pattern Matching)")
+                        elif classification_source == 'similarity':
+                            st.success("✅ Classification Complete! (Using Similarity Search)")
                         else:
                             st.success("✅ Classification Complete!")
                         
@@ -664,9 +674,13 @@ def show_process_transactions():
                             match_quality = result.get('match_quality', 'N/A')
                             confidence_score = result.get('confidence_score', 0.0)
                             
-                            # Highlight LLM usage
+                            # Highlight classification method
                             if classification_source == 'llm':
                                 st.success(f"🤖 **LLM Classification** (Confidence: {confidence_score:.3f} < threshold: 0.65)")
+                            elif classification_source == 'rule_based':
+                                st.success(f"📋 **Rule-Based Classification** (Fast pattern matching)")
+                            elif classification_source == 'similarity':
+                                st.info(f"🔍 **Similarity-Based Classification** (FAISS search, respects feedback)")
                             elif classification_source == 'direct_fallback':
                                 st.warning(f"⚠️ **LLM Failed, Using Fallback** (Confidence: {confidence_score:.3f})")
                             else:
