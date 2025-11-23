@@ -62,5 +62,5 @@ data/search_cache/
 data/embeddings_cache.pkl
 data/vectors/
 data/feedback_knowledge/
-# data/training_data/*.csv  # Commented out - training data should be tracked
+data/training_data/*.csv
 tests/test_suite.py
