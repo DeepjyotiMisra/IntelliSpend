@@ -1246,7 +1246,12 @@ def show_analytics():
     with col1:
         if 'classification_source' in df.columns:
             llm_pct = (df['classification_source'] == 'llm').sum() / len(df) * 100
+            rule_based_pct = (df['classification_source'] == 'rule_based').sum() / len(df) * 100
+            similarity_pct = (df['classification_source'] == 'similarity').sum() / len(df) * 100
             st.metric("LLM Usage", f"{llm_pct:.1f}%")
+            st.caption(f"Rule-based: {rule_based_pct:.1f}% | Similarity: {similarity_pct:.1f}%")
+        else:
+            st.metric("LLM Usage", "0%")
     
     with col2:
         if 'confidence_score' in df.columns:
