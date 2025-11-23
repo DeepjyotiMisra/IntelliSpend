@@ -142,13 +142,13 @@ def process_single_transaction(description: str, amount: float = None, date: str
         
         # High confidence similarity match - use it (respects feedback)
         if best_match and confidence_score >= settings.LOCAL_MATCH_THRESHOLD:
-                # High confidence similarity match - use it
-                merchant = best_match.get('merchant', 'UNKNOWN')
-                category = best_match.get('category', 'Other')
-                confidence = confidence_score
-                match_quality = 'high'
-                classification_source = 'similarity'
-            else:
+            # High confidence similarity match - use it
+            merchant = best_match.get('merchant', 'UNKNOWN')
+            category = best_match.get('category', 'Other')
+            confidence = confidence_score
+            match_quality = 'high'
+            classification_source = 'similarity'
+        else:
                 # 2b. Low/no similarity match - try rule-based classification (fast fallback)
                 # Rule-based uses hardcoded patterns, so only use if similarity didn't match
                 rule_result = None
