@@ -1,0 +1,1 @@
+fatal: path 'data/training_data/transactions_global_5000.csv' exists on disk, but not in 'hackathon/create-rag-structure'
