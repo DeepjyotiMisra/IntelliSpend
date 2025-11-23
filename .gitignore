@@ -51,3 +51,14 @@ output/*.json
 # FAISS indices
 *.faiss
 *.index
+
+# User-generated data (should not be committed)
+data/feedback/feedback.csv
+data/feedback/feedback_log.json
+data/temp_upload.csv
+data/temp_*.csv
+data/test_transactions_50.csv
+data/search_cache/
+data/embeddings_cache.pkl
+data/vectors/
+data/feedback_knowledge/

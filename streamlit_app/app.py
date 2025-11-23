@@ -1743,8 +1743,6 @@ def show_apply_feedback():
                                             st.error(f"❌ Error: {result.get('error')}")
                                     else:
                                         st.error("❌ Could not find feedback record to delete")
-                                        # Debug info
-                                        st.caption(f"Debug: Looking for record with transaction='{row.get('transaction_description')}', amount={row.get('amount')}, date={row.get('date')}")
                             
                             st.divider()
                     
