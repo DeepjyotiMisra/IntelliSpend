@@ -1,5 +1,3 @@
-# Environment variables
-.env
 
 # Python
 __pycache__/
@@ -16,6 +14,7 @@ dist/
 venv/
 ENV/
 env/
+path/
 
 # IDE
 .vscode/
@@ -28,35 +27,39 @@ env/
 Thumbs.db
 
 # Logs
+logs/*.log
 *.log
 intellispend.log
+
+# Data files (keep structure, ignore large generated files)
+# Vector indices (generated artifacts)
+data/vector_data/*.faiss
+data/vector_data/*.pkl
+# Raw data (tracked)
+# Note: raw_transactions.csv is tracked as it's the input file
+# Note: merchants_seed.csv is tracked as seed data
+
+# Output files
+output/*.csv
+output/*.json
 
 # Temporary files
 *.tmp
 *.temp
 
-# Test files and documentation drafts
-test_*.py
-*_test.py
-ENHANCEMENT_*.md
-FINAL_*.md
-UI_FIXES_*.md
+# FAISS indices
+*.faiss
+*.index
 
-# Demo and result files
-intellispend_demo_results.json
-*_demo_results.json
-*_results.json
-
-# Cache and data
-data/embeddings_cache.pkl
-data/feedback/
-data/vectors/
-data/embeddings/
+# User-generated data (should not be committed)
+data/feedback/feedback.csv
+data/feedback/feedback_log.json
+data/temp_upload.csv
+data/temp_*.csv
+data/test_transactions_50.csv
 data/search_cache/
+data/embeddings_cache.pkl
+data/vectors/
 data/feedback_knowledge/
-data/results/
-*.txt
-result.txt
-
-# Large sample files
-sample_transactions_large.json
+# data/training_data/*.csv  # Commented out - training data should be tracked
+tests/test_suite.py

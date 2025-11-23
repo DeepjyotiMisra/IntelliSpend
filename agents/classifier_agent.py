@@ -1,636 +1,444 @@
-"""
-Classifier Agent - Performs transaction categorization in IntelliSpend
-This agent implements multiple classification strategies including exact matching,
-similarity search, rule-based classification, and LLM-based reasoning.
-"""
+"""Classifier Agent for IntelliSpend - Uses LLM reasoning to classify transactions"""
+
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agno.agent import Agent
-from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.tools import tool
-from typing import List, Dict, Any, Optional, Tuple
-import re
+from agno.tools import Toolkit
+from typing import Dict, Any, Optional
+import os
+from dotenv import load_dotenv
 import logging
-from models.transaction import TransactionData, CategoryPrediction
-from config.config import OPENAI_API_KEY, OPENAI_BASE_URL, MODEL_NAME
+
+from config.settings import settings
+from agents.tools import retrieve_similar_merchants, get_taxonomy_categories
+import re
+from typing import Tuple, List
 
 logger = logging.getLogger(__name__)
 
+# Load environment configuration
+load_dotenv(Path(__file__).parent.parent / '.env')
 
-class ClassifierAgent(Agent):
+
+def _load_merchant_rules() -> Dict[str, str]:
+    """Load merchant-to-category mapping rules using regex patterns."""
+    return {
+        # Food & Dining
+        r'(?i)(mcdonald\'?s|mcdonalds|burger king|kfc|taco bell|subway|pizza|restaurant|cafe|starbucks|dunkin|zomato|swiggy|food|dining|biryani|darbar|kitchen|grill|deli)': 'Food & Dining',
+        r'(?i)(grocery|supermarket|walmart|target|safeway|kroger|whole foods|bigbasket|grofers|dmart|reliance fresh)': 'Food & Dining',
+        
+        # Transportation
+        r'(?i)(uber|lyft|ola|rapido|taxi|gas|shell|exxon|bp|chevron|mobil|parking|fuel|petrol|diesel|transport)': 'Transportation',
+        r'(?i)(airline|airport|flight|car rental|train|bus|metro|railway|irctc|makemytrip|goibibo)': 'Transportation',
+        
+        # Shopping
+        r'(?i)(amazon|flipkart|ajio|myntra|ebay|shop|store|retail|mall|clothing|fashion|apparel|shopping)': 'Shopping',
+        
+        # Entertainment
+        r'(?i)(netflix|spotify|hotstar|prime|disney|movie|theater|game|music|entertainment|streaming|cinema)': 'Entertainment',
+        
+        # Bills & Utilities
+        r'(?i)(electric|gas company|water|internet|phone|cable|utility|bsnl|airtel|jio|vi|vodafone|reliance|broadband)': 'Bills & Utilities',
+        
+        # Financial
+        r'(?i)(bank|atm|fee|interest|payment|transfer|loan|sbi|hdfc|icici|axis|kotak|upi|neft|imps|investment|mutual fund)': 'Financial',
+        
+        # Health & Medical
+        r'(?i)(hospital|doctor|medical|pharmacy|health|dental|apollo|fortis|max|pharmacy|chemist|medicine|clinic)': 'Health & Medical',
+        
+        # Home & Garden
+        r'(?i)(home depot|lowes|hardware|furniture|garden|repair|ikea|pepperfry|urban ladder|home improvement)': 'Home & Garden',
+        
+        # Travel
+        r'(?i)(hotel|booking|travel|trip|vacation|resort|airbnb|oyo|makemytrip|goibibo|travel)': 'Travel',
+        
+        # Education
+        r'(?i)(school|university|college|tuition|education|course|training|learning|edtech|byju|unacademy)': 'Education'
+    }
+
+
+def _load_description_rules() -> Dict[str, str]:
+    """Load description pattern rules."""
+    return {
+        r'(?i)(coffee|lunch|dinner|breakfast|meal|food|snack|beverage|drink)': 'Food & Dining',
+        r'(?i)(gas|fuel|gasoline|petrol|diesel|refuel)': 'Transportation',
+        r'(?i)(subscription|monthly|recurring|membership|premium)': 'Bills & Utilities',
+        r'(?i)(withdrawal|deposit|transfer|payment|transaction)': 'Financial',
+        r'(?i)(fee|charge|penalty|service charge)': 'Financial',
+        r'(?i)(refund|return|credit|cashback|reward)': 'Other',
+        r'(?i)(shopping|purchase|buy|order|delivery)': 'Shopping',
+        r'(?i)(movie|cinema|theater|ticket|show)': 'Entertainment'
+    }
+
+
+def _load_amount_rules() -> List[Tuple[float, float, str, float]]:
+    """Load amount-based classification rules."""
+    return [
+        # (min_amount, max_amount, category, confidence)
+        (0.99, 15.99, 'Food & Dining', 0.6),  # Small food purchases
+        (200, 1000, 'Shopping', 0.5),         # Medium shopping
+        (1000, float('inf'), 'Major Purchase', 0.4),  # Large purchases
+        (0.01, 5.00, 'Fees', 0.7),           # Small fees
+    ]
+
+
+def apply_rule_based_classification(description: str, amount: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """
-    Agent responsible for transaction classification using multiple strategies.
+    Apply rule-based pattern classification before LLM.
     
-    Key responsibilities:
-    - Exact merchant matching
-    - Rule-based classification
-    - Similarity-based classification
-    - LLM-powered intelligent classification
-    - Confidence scoring
+    Classification order: Similarity → Rule-based → LLM
+    
+    Args:
+        description: Transaction description
+        amount: Transaction amount (optional)
+        
+    Returns:
+        Classification result if pattern matches, None otherwise
     """
+    try:
+        merchant_rules = _load_merchant_rules()
+        description_rules = _load_description_rules()
+        amount_rules = _load_amount_rules()
+        
+        description_lower = description.lower()
+        
+        # Strategy 1: Check merchant name patterns
+        for pattern, category in merchant_rules.items():
+            if re.search(pattern, description_lower):
+                logger.debug(f"Rule-based merchant pattern match: {pattern} -> {category}")
+                return {
+                    "merchant": description.upper()[:50],  # Extract merchant from description
+                    "category": category,
+                    "confidence": "high",
+                    "reasoning": f"Matched merchant pattern: {pattern}",
+                    "method": "rule_based_merchant"
+                }
+        
+        # Strategy 2: Check description patterns
+        for pattern, category in description_rules.items():
+            if re.search(pattern, description_lower):
+                logger.debug(f"Rule-based description pattern match: {pattern} -> {category}")
+                return {
+                    "merchant": description.upper()[:50],
+                    "category": category,
+                    "confidence": "medium",
+                    "reasoning": f"Matched description pattern: {pattern}",
+                    "method": "rule_based_description"
+                }
+        
+        # Strategy 3: Check amount-based rules (if amount provided)
+        if amount is not None:
+            for min_amt, max_amt, category, conf in amount_rules:
+                if min_amt <= abs(amount) <= max_amt:
+                    logger.debug(f"Rule-based amount match: {amount} -> {category}")
+                    return {
+                        "merchant": description.upper()[:50],
+                        "category": category,
+                        "confidence": "medium" if conf >= 0.6 else "low",
+                        "reasoning": f"Matched amount range: ${min_amt}-${max_amt}",
+                        "method": "rule_based_amount"
+                    }
+        
+        return None  # No rule match found
+        
+    except Exception as e:
+        logger.error(f"Error in rule-based classification: {e}")
+        return None
+
+# Lazy imports for LLM models (only import when needed)
+def _import_openai():
+    """Lazy import OpenAI model"""
+    try:
+        from agno.models.openai import OpenAIChat
+        return OpenAIChat
+    except ImportError as e:
+        raise ImportError(f"OpenAI model not available: {e}. Install with: pip install agno[openai]")
+
+def _import_gemini():
+    """Lazy import Gemini model"""
+    try:
+        from agno.models.google import Gemini
+        return Gemini
+    except ImportError as e:
+        raise ImportError(f"Gemini model not available: {e}. Install with: pip install google-genai")
+
+
+def create_classifier_agent() -> Agent:
+    """
+    Create Classifier Agent with configurable LLM provider (OpenAI or Google Gemini).
     
-    def __init__(self):
-        super().__init__(
-            name="ClassifierAgent",
-            description="Classifies transactions using multiple intelligent strategies with advanced analysis tools",
-            instructions=[
-                "Apply exact merchant matching for known merchants",
-                "Use rule-based classification for pattern recognition", 
-                "Leverage similarity search for merchant matching",
-                "Apply LLM reasoning for complex cases",
-                "Use custom tools for merchant analysis and confidence validation",
-                "Provide confidence scores for all predictions"
-            ],
-            tools=[
-                DuckDuckGoTools()  # Web search for unknown merchants
-            ]
+    Configuration via environment variables:
+    - CLASSIFIER_MODEL_PROVIDER: 'openai' or 'gemini' (default: 'gemini')
+    
+    For OpenAI:
+    - OPENAI_API_KEY: Required
+    - MODEL_NAME: Model name (default: 'gpt-4o-mini')
+    - AZURE_OPENAI_ENDPOINT: Optional (for Azure OpenAI)
+    - MODEL_API_VERSION: Optional (for Azure OpenAI)
+    
+    For Gemini:
+    - GOOGLE_API_KEY: Required
+    - GEMINI_MODEL_NAME: Model name (default: 'gemini-2.0-flash')
+    
+    The Classifier Agent is responsible for:
+    - Analyzing retrieved merchants and their similarity scores
+    - Using LLM reasoning to determine the best category
+    - Handling ambiguous cases and edge cases
+    - Providing explanations for classification decisions
+    - Considering multiple factors: amount, payment mode, context
+    """
+    # Determine which provider to use
+    provider = os.getenv('CLASSIFIER_MODEL_PROVIDER', 'gemini').lower()
+    
+    if provider == 'gemini':
+        # Google Gemini configuration
+        Gemini = _import_gemini()  # Lazy import
+        api_key = os.getenv('GOOGLE_API_KEY')
+        model_name = os.getenv('GEMINI_MODEL_NAME', 'gemini-2.0-flash')
+        
+        if not api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY is required for Gemini. "
+                "Get your API key from: https://aistudio.google.com/apikey"
+            )
+        
+        logger.info(f"Using Google Gemini configuration with model: {model_name}")
+        model_config = Gemini(
+            id=model_name,
+            api_key=api_key
         )
         
-        # Standard spending categories
-        self.standard_categories = [
-            "Food & Dining", "Shopping", "Transportation", "Bills & Utilities",
-            "Entertainment", "Health & Medical", "Travel", "Education",
-            "Personal Care", "Financial", "Business", "Gifts & Donations",
-            "Home & Garden", "Auto & Transport", "Insurance", "Taxes",
-            "Investments", "Other"
-        ]
+    elif provider == 'openai':
+        # OpenAI configuration (supports both Azure and direct OpenAI)
+        OpenAIChat = _import_openai()  # Lazy import
+        api_key = os.getenv('OPENAI_API_KEY')
+        model_name = os.getenv('MODEL_NAME', 'gpt-4o-mini')
+        azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+        api_version = os.getenv('MODEL_API_VERSION')
         
-        # Available categories
-        self.categories = [
-            "Food & Dining", "Transportation", "Shopping", "Entertainment",
-            "Bills & Utilities", "Financial", "Health & Medical", 
-            "Home & Garden", "Travel", "Education", "Income", "Other"
-        ]
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required for OpenAI")
         
-        # Classification rules
-        self.merchant_rules = self._load_merchant_rules()
-        self.amount_rules = self._load_amount_rules()
-        self.description_rules = self._load_description_rules()
-        
-        # Agno OpenAI model for LLM classification
-        self.model = None
-        self._initialize_llm_model()
-    
-    def _initialize_llm_model(self):
-        """Initialize OpenAI client for OpenAI models."""
-        try:
-            # Use configuration from config file
-            if OPENAI_API_KEY and OPENAI_BASE_URL:
-                # Initialize using basicAgents working pattern with Agno OpenAIChat
-                from agno.models.openai import OpenAIChat
-                
-                # Create Agno OpenAI model with basicAgents pattern
-                self.model = OpenAIChat(
-                    id= MODEL_NAME,
-                    base_url=OPENAI_BASE_URL,
-                    extra_headers={
-                        "Api-Key": OPENAI_API_KEY,
-                        "Content-Type": "application/json"
-                    },
-                    timeout=60.0,
-                    max_retries=3
-                )
-                
-                logger.info("OpenAI model initialized for classification agent")
-            else:
-                logger.warning("Missing OpenAI configuration - classifier will use rule-based methods only")
-                self.model = None
-            
-        except Exception as e:
-            logger.warning(f"Could not initialize OpenAI model: {e}")
-            self.model = None
-    
-    def _load_merchant_rules(self) -> Dict[str, str]:
-        """Load merchant-to-category mapping rules."""
-        return {
-            # Food & Dining
-            r'(?i)(mcdonald\'?s|mcdonalds|burger king|kfc|taco bell|subway|pizza|restaurant|cafe|starbucks|dunkin)': 'Food & Dining',
-            r'(?i)(grocery|supermarket|walmart|target|safeway|kroger|whole foods)': 'Food & Dining',
-            
-            # Transportation
-            r'(?i)(uber|lyft|taxi|gas|shell|exxon|bp|chevron|mobil|parking)': 'Transportation',
-            r'(?i)(airline|airport|flight|car rental|train|bus)': 'Transportation',
-            
-            # Shopping
-            r'(?i)(amazon|ebay|shop|store|retail|mall|clothing|fashion)': 'Shopping',
-            
-            # Entertainment
-            r'(?i)(netflix|spotify|hulu|disney|movie|theater|game|music)': 'Entertainment',
-            
-            # Bills & Utilities
-            r'(?i)(electric|gas company|water|internet|phone|cable|utility)': 'Bills & Utilities',
-            
-            # Financial
-            r'(?i)(bank|atm|fee|interest|payment|transfer|loan)': 'Financial',
-            
-            # Health & Medical
-            r'(?i)(hospital|doctor|medical|pharmacy|health|dental)': 'Health & Medical',
-            
-            # Home & Garden
-            r'(?i)(home depot|lowes|hardware|furniture|garden|repair)': 'Home & Garden'
-        }
-    
-    def _load_amount_rules(self) -> List[Tuple[float, float, str, float]]:
-        """Load amount-based classification rules."""
-        return [
-            # (min_amount, max_amount, category, confidence)
-            (0.99, 15.99, 'Food & Dining', 0.6),  # Small food purchases
-            (200, 1000, 'Shopping', 0.5),         # Medium shopping
-            (1000, float('inf'), 'Major Purchase', 0.4),  # Large purchases
-            (0.01, 5.00, 'Fees', 0.7),           # Small fees
-        ]
-    
-    def _load_description_rules(self) -> Dict[str, str]:
-        """Load description pattern rules."""
-        return {
-            r'(?i)(coffee|lunch|dinner|breakfast)': 'Food & Dining',
-            r'(?i)(gas|fuel|gasoline)': 'Transportation',
-            r'(?i)(subscription|monthly|recurring)': 'Bills & Utilities',
-            r'(?i)(withdrawal|deposit|transfer)': 'Financial',
-            r'(?i)(fee|charge|penalty)': 'Financial',
-            r'(?i)(refund|return|credit)': 'Other'
-        }
-    
-
-    
-
-    
-    def similarity_based_classification(self, transaction: TransactionData, 
-                                      similar_merchants: List[Tuple[str, float, str]]) -> Optional[CategoryPrediction]:
-        """Classify based on similar merchant matches."""
-        try:
-            if not similar_merchants:
-                return None
-            
-            # Use the most similar merchant
-            best_merchant, similarity, category = similar_merchants[0]
-            
-            # Only use if similarity is high enough
-            if similarity >= 0.7:
-                confidence = min(0.85, similarity * 0.9)  # Scale down confidence slightly
-                
-                return CategoryPrediction(
-                    category=category,
-                    confidence_score=confidence,
-                    agent_name="similarity_match",
-                    reasoning=f"Similar to '{best_merchant}' (similarity: {similarity:.3f})"
-                )
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error in similarity-based classification: {e}")
-            return None
-    
-    def web_search_classification(self, transaction: TransactionData) -> Optional[CategoryPrediction]:
-        """Use web search to classify unknown merchants when confidence is low - leverages LLM tools."""
-        try:
-            # Clean merchant name for search
-            clean_merchant = transaction.merchant_name.strip().replace('#', '').replace('*', '')
-            
-            logger.info(f"Triggering LLM-based web search for merchant: {clean_merchant}")
-            
-            # Use LLM with tools to perform web search and classification
-            if self.model:
-                try:
-                    from agno.models.message import Message
-                    
-                    # Create a prompt that encourages the LLM to use web search tools
-                    search_prompt = f"""
-                    I need to classify the merchant "{transaction.merchant_name}" for a transaction of ${abs(transaction.amount):.2f}.
-                    
-                    The merchant is unknown and I need to determine which category it belongs to from: {', '.join(self.categories)}
-                    
-                    Please use web search to find information about this merchant's business type and classify it appropriately.
-                    Consider the transaction amount as additional context.
-                    
-                    Respond with just the category name followed by your confidence (1-10).
-                    Example: "Shopping 8"
-                    """
-                    
-                    messages = [
-                        Message(role="system", content="You are a transaction categorization expert with access to web search tools. Use DuckDuckGo search to research unknown merchants and classify them accurately."),
-                        Message(role="user", content=search_prompt)
-                    ]
-                    
-                    # Let the LLM use tools to research the merchant
-                    response = self.model.invoke(messages, assistant_message=Message(role="assistant", content=""))
-                    response_text = response.content.strip()
-                    
-                    # Parse the response to extract category and reasoning
-                    category, confidence, reasoning = self._parse_web_search_response(response_text, clean_merchant)
-                    
-                    logger.info(f"LLM-based web search result for {clean_merchant}: {category} ({confidence:.2f})")
-                    
-                    return CategoryPrediction(
-                        category=category,
-                        confidence_score=confidence,
-                        agent_name="llm_with_web_search",
-                        reasoning=f"LLM web search classification: {reasoning}"
-                    )
-                    
-                except Exception as llm_error:
-                    logger.warning(f"LLM-based web search failed: {llm_error}")
-            
-            # Fallback to simple pattern analysis if LLM web search fails
-            merchant_lower = clean_merchant.lower()
-            
-            # Simple pattern-based category inference
-            if any(term in merchant_lower for term in ['cafe', 'coffee', 'restaurant', 'kitchen', 'deli', 'grill', 'food', 'pizza', 'burger']):
-                category = 'Food & Dining'
-            elif any(term in merchant_lower for term in ['gas', 'fuel', 'station', 'uber', 'lyft', 'taxi', 'parking']):
-                category = 'Transportation'
-            elif any(term in merchant_lower for term in ['amazon', 'store', 'shop', 'retail', 'target', 'walmart', 'mall']):
-                category = 'Shopping'
-            elif any(term in merchant_lower for term in ['medical', 'hospital', 'pharmacy', 'clinic', 'health', 'doctor']):
-                category = 'Health & Medical'
-            elif any(term in merchant_lower for term in ['electric', 'utility', 'services', 'internet', 'phone', 'cable']):
-                if 50 <= transaction.amount <= 500:
-                    category = 'Bills & Utilities'
-                else:
-                    category = 'Other'
-            elif any(term in merchant_lower for term in ['netflix', 'spotify', 'entertainment', 'theater', 'movie']):
-                category = 'Entertainment'
-            else:
-                # Amount-based inference for generic names
-                if transaction.amount < 20:
-                    category = 'Food & Dining'  # Small amounts often food
-                elif 20 <= transaction.amount <= 100:
-                    category = 'Shopping'      # Medium amounts often shopping
-                elif transaction.amount > 100:
-                    category = 'Bills & Utilities'  # Large amounts often bills
-                else:
-                    category = 'Other'
-            
-            confidence = 0.5
-            
-            return CategoryPrediction(
-                category=category,
-                confidence_score=confidence,
-                agent_name="pattern_analysis",
-                reasoning=f"Pattern analysis for merchant '{clean_merchant}' [LLM web search attempted but failed]"
+        # Determine if using Azure or direct OpenAI
+        if azure_endpoint and api_version and 'your-azure' not in azure_endpoint.lower():
+            # Azure OpenAI configuration
+            logger.info("Using Azure OpenAI configuration")
+            model_endpoint = (
+                f"{azure_endpoint}/openai/deployments/{model_name}/chat/completions"
+                f"?api-version={api_version}"
             )
-            
-        except Exception as e:
-            logger.error(f"Error in web search classification: {e}")
-            return None
+            model_config = OpenAIChat(
+                id=model_name,
+                base_url=model_endpoint,
+                extra_headers={
+                    "Api-Key": api_key,
+                    "Content-Type": "application/json"
+                },
+                timeout=60.0,
+                max_retries=3
+            )
+        else:
+            # Direct OpenAI configuration
+            logger.info("Using direct OpenAI configuration")
+            model_config = OpenAIChat(
+                id=model_name,
+                api_key=api_key,
+                timeout=60.0,
+                max_retries=3
+            )
+    else:
+        raise ValueError(
+            f"Invalid CLASSIFIER_MODEL_PROVIDER: {provider}. "
+            "Must be 'openai' or 'gemini'"
+        )
     
-
-    
-    def _parse_web_search_response(self, response_text: str, merchant_name: str) -> Tuple[str, float, str]:
-        """Parse LLM response from web search to extract category, confidence, and reasoning."""
-        try:
-            response_lower = response_text.lower()
-            
-            # Look for explicit category mentions in response
-            category_found = None
-            confidence = 0.7  # Default confidence for web search results
-            
-            # Check for category keywords in the response
-            for category in self.categories:
-                if category.lower() in response_lower:
-                    category_found = category
-                    break
-            
-            # If no explicit category found, try pattern matching on business types
-            if not category_found:
-                if any(term in response_lower for term in ['restaurant', 'food', 'dining', 'cafe', 'pizza', 'burger']):
-                    category_found = 'Food & Dining'
-                elif any(term in response_lower for term in ['gas', 'fuel', 'automotive', 'transportation', 'uber', 'lyft']):
-                    category_found = 'Transportation'
-                elif any(term in response_lower for term in ['store', 'retail', 'shopping', 'market', 'mall']):
-                    category_found = 'Shopping'
-                elif any(term in response_lower for term in ['entertainment', 'movie', 'theater', 'cinema']):
-                    category_found = 'Entertainment'
-                elif any(term in response_lower for term in ['medical', 'health', 'pharmacy', 'hospital']):
-                    category_found = 'Health & Medical'
-                elif any(term in response_lower for term in ['utility', 'electric', 'gas company', 'internet', 'phone']):
-                    category_found = 'Bills & Utilities'
-                elif any(term in response_lower for term in ['bank', 'financial', 'investment', 'fee']):
-                    category_found = 'Financial'
-                else:
-                    # Fallback to simple pattern analysis
-                    merchant_lower = merchant_name.lower()
-                    if any(term in merchant_lower for term in ['cafe', 'coffee', 'restaurant', 'kitchen', 'food', 'pizza', 'burger']):
-                        category_found = 'Food & Dining'
-                    elif any(term in merchant_lower for term in ['gas', 'fuel', 'station', 'uber', 'lyft', 'taxi', 'parking']):
-                        category_found = 'Transportation'
-                    elif any(term in merchant_lower for term in ['amazon', 'store', 'shop', 'retail', 'target', 'walmart', 'mall']):
-                        category_found = 'Shopping'
-                    elif any(term in merchant_lower for term in ['medical', 'hospital', 'pharmacy', 'clinic', 'health', 'doctor']):
-                        category_found = 'Health & Medical'
-                    elif any(term in merchant_lower for term in ['electric', 'utility', 'services', 'internet', 'phone', 'cable']):
-                        category_found = 'Bills & Utilities'
-                    elif any(term in merchant_lower for term in ['netflix', 'spotify', 'entertainment', 'theater', 'movie']):
-                        category_found = 'Entertainment'
-                    else:
-                        category_found = 'Other'
-                    confidence = 0.5
-            
-            # Extract reasoning (first sentence or up to 100 chars)
-            reasoning_lines = response_text.strip().split('\n')
-            reasoning = reasoning_lines[0][:100] if reasoning_lines else f"Classified as {category_found} based on web search"
-            
-            return category_found, confidence, reasoning
-            
-        except Exception as e:
-            logger.error(f"Error parsing web search response: {e}")
-            # Fallback to simple pattern analysis
-            merchant_lower = merchant_name.lower()
-            if any(term in merchant_lower for term in ['cafe', 'coffee', 'restaurant', 'kitchen', 'food', 'pizza', 'burger']):
-                category = 'Food & Dining'
-            elif any(term in merchant_lower for term in ['gas', 'fuel', 'station', 'uber', 'lyft', 'taxi', 'parking']):
-                category = 'Transportation'
-            elif any(term in merchant_lower for term in ['amazon', 'store', 'shop', 'retail', 'target', 'walmart', 'mall']):
-                category = 'Shopping'
-            elif any(term in merchant_lower for term in ['medical', 'hospital', 'pharmacy', 'clinic', 'health', 'doctor']):
-                category = 'Health & Medical'
-            elif any(term in merchant_lower for term in ['electric', 'utility', 'services', 'internet', 'phone', 'cable']):
-                category = 'Bills & Utilities'
-            elif any(term in merchant_lower for term in ['netflix', 'spotify', 'entertainment', 'theater', 'movie']):
-                category = 'Entertainment'
-            else:
-                category = 'Other'
-            
-            return category, 0.4, f"Fallback pattern classification for {merchant_name}"
-
-
-    
-    def llm_classification(self, transaction: TransactionData) -> Optional[CategoryPrediction]:
-        """Use LLM for intelligent classification."""
-        try:
-            if not hasattr(self, 'model') or not self.model:
-                logger.debug("Agno OpenAI model not available, skipping LLM classification")
-                return None
-            
-            # Create a descriptive prompt for classification
-            prompt = f"""
-            Classify the following transaction into one of these categories:
-            {', '.join(self.categories)}
-            
-            Transaction details:
-            - Merchant: {transaction.merchant_name}
-            - Amount: ${abs(transaction.amount):.2f}
-            - Description: {transaction.description}
-            - Date: {transaction.transaction_date.strftime('%Y-%m-%d') if transaction.transaction_date else 'Unknown'}
-            
-            Please respond with only the category name that best fits this transaction.
-            If you are uncertain or the merchant is unknown, choose 'Other'.
-            Rate your confidence on a scale of 1-10 after the category (e.g., "Food & Dining 8").
-            """
-            
-            # Create proper Agno Message objects
-            from agno.models.message import Message
-            messages = [
-                Message(role="system", content="You are a financial transaction categorization expert. Respond with the category name followed by your confidence score (1-10). Be conservative with confidence for unknown merchants."),
-                Message(role="user", content=prompt)
+    # Create toolkit with classification tools
+    try:
+        toolkit = Toolkit(
+            name="ClassificationTools",
+            tools=[
+                retrieve_similar_merchants,
+                get_taxonomy_categories
             ]
+        )
+        tools_list = [toolkit]
+    except Exception as e:
+        # Fallback: use functions directly if Toolkit doesn't work
+        logger.warning(f"Toolkit creation failed: {e}. Using functions directly.")
+        tools_list = [retrieve_similar_merchants, get_taxonomy_categories]
+    
+    # Create agent
+    agent = Agent(
+        name="ClassifierAgent",
+        model=model_config,
+        description=(
+            "I am the Classifier Agent for IntelliSpend. "
+            "My role is to classify transactions into categories using LLM reasoning. "
+            "I analyze retrieved merchants, their similarity scores, and transaction context "
+            "to determine the most appropriate category. "
+            "I handle ambiguous cases, edge cases, and provide explanations for my decisions. "
+            "I consider multiple factors: transaction description, amount, payment mode, "
+            "and similarity scores from the retrieval system."
+        ),
+        tools=tools_list,
+        markdown=True,
+        instructions=[
+            "When asked to classify a transaction:",
+            "1. First, use retrieve_similar_merchants tool to find similar merchants",
+            "2. Use get_taxonomy_categories tool to see available categories",
+            "3. Analyze the retrieved merchants and their similarity scores",
+            "4. Consider the transaction context (description, amount, payment mode)",
+            "5. Use LLM reasoning to determine the best category",
+            "6. Provide a clear explanation for your classification decision",
+            "",
+            "For high-confidence matches (score ≥ 0.76), use the best match's category.",
+            "For low-confidence matches (score < 0.76), analyze all retrieved merchants and use reasoning.",
+            "For ambiguous cases, consider transaction amount, payment mode, and context.",
+            "Always explain your reasoning, especially for edge cases.",
+            "",
+            "Return structured results with:",
+            "- merchant: Identified merchant name",
+            "- category: Assigned category",
+            "- confidence: Your confidence level (high/medium/low)",
+            "- reasoning: Explanation of your decision"
+        ]
+    )
+    
+    return agent
+
+
+def classify_transaction(description: str, 
+                        amount: Optional[float] = None,
+                        payment_mode: Optional[str] = None,
+                        retrieved_merchants: Optional[list] = None) -> Dict[str, Any]:
+    """
+    Convenience function to classify a transaction using the Classifier Agent.
+    
+    Args:
+        description: Transaction description
+        amount: Transaction amount (optional)
+        payment_mode: Payment mode (optional)
+        retrieved_merchants: Pre-retrieved merchants (optional, will retrieve if not provided)
+        
+    Returns:
+        Classification result with merchant, category, confidence, and reasoning
+    """
+    agent = create_classifier_agent()
+    
+    # Build prompt
+    prompt_parts = [
+        f"Classify this transaction: \"{description}\""
+    ]
+    
+    if amount:
+        prompt_parts.append(f"Amount: {amount}")
+    if payment_mode:
+        prompt_parts.append(f"Payment Mode: {payment_mode}")
+    
+    if retrieved_merchants:
+        prompt_parts.append("\nRetrieved merchants (for reference only, similarity scores are low):")
+        for i, merchant in enumerate(retrieved_merchants[:5], 1):
+            prompt_parts.append(
+                f"{i}. {merchant.get('merchant', 'Unknown')} - "
+                f"{merchant.get('category', 'Unknown')} "
+                f"(similarity: {merchant.get('score', 0):.3f})"
+            )
+        prompt_parts.append("\nNOTE: These retrieved merchants have low similarity scores and may not be relevant.")
+    else:
+        prompt_parts.append("\nNo similar merchants found in the database.")
+    
+    prompt_parts.append("\nIMPORTANT INSTRUCTIONS:")
+    prompt_parts.append("1. Extract the merchant name DIRECTLY from the transaction description")
+    prompt_parts.append("   - Example: 'Punjabi darbar dinner' → merchant: 'PUNJABI DARBAR'")
+    prompt_parts.append("   - Do NOT use merchant names from retrieved merchants if they don't match")
+    prompt_parts.append("2. Determine the category based on the transaction description and amount")
+    prompt_parts.append("3. CONFIDENCE LEVEL GUIDELINES:")
+    prompt_parts.append("   - Use 'high' confidence when:")
+    prompt_parts.append("     * The description clearly indicates the merchant (e.g., 'AJIO SHOPPING', 'ZOMATO DELHI')")
+    prompt_parts.append("     * The category is explicitly mentioned or obvious (e.g., 'SHOPPING', 'GROCERIES', 'FOOD')")
+    prompt_parts.append("     * The merchant is well-known and the category matches (e.g., AMAZON → Shopping, UBER → Transport)")
+    prompt_parts.append("   - Use 'medium' confidence when:")
+    prompt_parts.append("     * The merchant is identifiable but category requires some inference")
+    prompt_parts.append("     * The description is somewhat ambiguous but still classifiable")
+    prompt_parts.append("   - Use 'low' confidence ONLY when:")
+    prompt_parts.append("     * The transaction description is very vague or unclear")
+    prompt_parts.append("     * You are genuinely uncertain about merchant or category")
+    prompt_parts.append("     * The description doesn't provide enough information")
+    prompt_parts.append("4. Provide your response in this EXACT format (no markdown, no bullets):")
+    prompt_parts.append("   Merchant: [merchant name]")
+    prompt_parts.append("   Category: [category name]")
+    prompt_parts.append("   Confidence: [high/medium/low]")
+    prompt_parts.append("   Reasoning: [brief explanation]")
+    
+    prompt = "\n".join(prompt_parts)
+    
+    response = agent.run(prompt)
+    return response.content
+
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Test the classifier agent
+    print("🎯 Testing Classifier Agent...\n")
+    
+    try:
+        agent = create_classifier_agent()
+        
+        # Test cases
+        test_transactions = [
+            {
+                "description": "AMAZON PAY INDIA TXN 12345",
+                "amount": 1500.0,
+                "payment_mode": "UPI"
+            },
+            {
+                "description": "UNKNOWN MERCHANT XYZ 98765",
+                "amount": 500.0,
+                "payment_mode": "CARD"
+            },
+            {
+                "description": "PAYMENT TO MERCHANT 12345",
+                "amount": 2000.0,
+                "payment_mode": "NEFT"
+            }
+        ]
+        
+        for i, transaction in enumerate(test_transactions, 1):
+            print(f"📝 Test {i}: {transaction['description']}")
+            print(f"   Amount: {transaction.get('amount')}, Payment: {transaction.get('payment_mode')}")
+            print("   Classifying...\n")
             
-            # Call using Agno OpenAI model with basicAgents configuration
-            response = self.model.invoke(messages, assistant_message=Message(role="assistant", content=""))
-            
-            # Extract the category and confidence from Agno response
-            response_text = response.content.strip()
-            
-            # Parse response for category and confidence
-            predicted_category = "Other"
-            confidence_score = 0.6  # Default medium confidence
-            
-            # Try to parse "Category Confidence" format
-            parts = response_text.split()
-            if len(parts) >= 2:
-                try:
-                    # Last part might be confidence score
-                    potential_confidence = float(parts[-1])
-                    if 1 <= potential_confidence <= 10:
-                        confidence_score = potential_confidence / 10.0  # Convert to 0-1 scale
-                        predicted_category = ' '.join(parts[:-1])
-                    else:
-                        predicted_category = response_text
-                except ValueError:
-                    predicted_category = response_text
-            else:
-                predicted_category = response_text
-            
-            # Validate the category
-            if predicted_category not in self.categories:
-                # If LLM returns invalid category, try to map it or fallback
-                logger.warning(f"LLM returned invalid category: {predicted_category}")
-                predicted_category = "Other"
-                confidence_score = 0.4  # Low confidence for invalid responses
-            
-            # Additional confidence adjustment for unknown merchants
-            merchant_lower = transaction.merchant_name.lower()
-            known_patterns = ['amazon', 'starbucks', 'mcdonalds', 'walmart', 'target', 'shell', 'exxon']
-            
-            if not any(pattern in merchant_lower for pattern in known_patterns):
-                # Unknown merchant - reduce confidence
-                confidence_score = min(0.7, confidence_score)
-                logger.debug(f"Reduced confidence for unknown merchant: {transaction.merchant_name}")
-            
-            return CategoryPrediction(
-                category=predicted_category,
-                confidence_score=confidence_score,
-                agent_name="llm",
-                reasoning=f"LLM classified '{transaction.merchant_name}' with confidence {confidence_score:.2f}"
+            result = classify_transaction(
+                transaction['description'],
+                transaction.get('amount'),
+                transaction.get('payment_mode')
             )
             
-        except Exception as e:
-            logger.error(f"Error in LLM classification: {e}")
-            return None
+            print(f"✅ Result:\n{result}\n")
+            print("-" * 80)
+            print()
     
-    def classify_transaction(self, transaction: TransactionData, 
-                           known_merchants: Dict[str, str] = None,
-                           similar_merchants: List[Tuple[str, float, str]] = None) -> CategoryPrediction:
-        """Main classification method using multiple strategies."""
-        try:
-            if known_merchants is None:
-                known_merchants = {}
-            
-            # Strategy 1: Check for exact merchant match (direct lookup)
-            if transaction.merchant_name in known_merchants:
-                return CategoryPrediction(
-                    category=known_merchants[transaction.merchant_name],
-                    confidence_score=0.95,
-                    agent_name="exact_match",
-                    reasoning=f"Exact match for known merchant: {transaction.merchant_name}"
-                )
-            
-            # Case-insensitive lookup
-            for known_merchant, category in known_merchants.items():
-                if transaction.merchant_name.lower() == known_merchant.lower():
-                    return CategoryPrediction(
-                        category=category,
-                        confidence_score=0.9,
-                        agent_name="exact_match_case_insensitive", 
-                        reasoning=f"Case-insensitive match for: {transaction.merchant_name}"
-                    )
-            
-            # Strategy 2: Rule-based classification using patterns
-            # Check merchant rules
-            merchant = transaction.merchant_name.lower()
-            for pattern, category in self.merchant_rules.items():
-                if re.search(pattern, merchant):
-                    result = CategoryPrediction(
-                        category=category,
-                        confidence_score=0.8,
-                        agent_name="rule_based_merchant",
-                        reasoning=f"Merchant pattern match: {pattern}"
-                    )
-                    if result.confidence_score >= 0.75:
-                        logger.debug(f"Rule-based classification: {result.category}")
-                        return result
-            
-            # Check description rules
-            description = transaction.description.lower()
-            for pattern, category in self.description_rules.items():
-                if re.search(pattern, description):
-                    result = CategoryPrediction(
-                        category=category,
-                        confidence_score=0.7,
-                        agent_name="rule_based_description",
-                        reasoning=f"Description pattern match: {pattern}"
-                    )
-                    if result.confidence_score >= 0.75:
-                        logger.debug(f"Rule-based classification: {result.category}")
-                        return result
-            
-            # Strategy 3: Similarity-based classification
-            if similar_merchants:
-                result = self.similarity_based_classification(transaction, similar_merchants)
-                if result and result.confidence_score >= 0.7:
-                    logger.debug(f"Similarity-based classification: {result.category}")
-                    return result
-            
-            # Strategy 4: LLM classification
-            result = self.llm_classification(transaction)
-            if result and result.confidence_score >= 0.8:  # Back to original threshold
-                logger.debug(f"LLM classification: {result.category}")
-                return result
-            
-            # Strategy 5: Web search for unknown merchants (original working logic)
-            web_search_attempted = False
-            if not result or result.confidence_score < 0.8:
-                logger.info(f"Low confidence ({result.confidence_score if result else 0:.2f}) - triggering web search for {transaction.merchant_name}")
-                web_search_attempted = True
-                web_result = self.web_search_classification(transaction)
-                if web_result and web_result.confidence_score > (result.confidence_score if result else 0):
-                    logger.debug(f"Web search enhanced classification: {web_result.category}")
-                    # Mark as LLM with web search
-                    web_result.agent_name = "llm_with_web_search"
-                    return web_result
-            
-            # Return LLM result with web search indicator if web search was attempted
-            if result:
-                if web_search_attempted:
-                    result.reasoning = f"{result.reasoning} [Web search consulted]"
-                return result
-            
-            # Final fallback
-            return CategoryPrediction(
-                category="Other",
-                confidence_score=0.3,
-                agent_name="fallback",
-                reasoning="Could not determine category with confidence"
-            )
-            
-        except Exception as e:
-            logger.error(f"Error classifying transaction {transaction.id}: {e}")
-            return CategoryPrediction(
-                category="Other",
-                confidence_score=0.1,
-                agent_name="error_fallback",
-                reasoning=f"Error in classification: {e}"
-            )
-    
-    def classify_batch(self, transactions: List[TransactionData],
-                      known_merchants: Dict[str, str] = None,
-                      similarity_results: Dict[str, List[Tuple[str, float, str]]] = None) -> List[CategoryPrediction]:
-        """Classify a batch of transactions."""
-        try:
-            if known_merchants is None:
-                known_merchants = {}
-            
-            if similarity_results is None:
-                similarity_results = {}
-            
-            predictions = []
-            
-            for transaction in transactions:
-                # Get similarity results for this transaction
-                similar_merchants = similarity_results.get(transaction.id, [])
-                
-                # Classify the transaction
-                prediction = self.classify_transaction(
-                    transaction, known_merchants, similar_merchants
-                )
-                
-                predictions.append(prediction)
-            
-            logger.info(f"Classified {len(predictions)} transactions")
-            return predictions
-            
-        except Exception as e:
-            logger.error(f"Error in batch classification: {e}")
-            return []
-    
-    def get_classification_stats(self, predictions: List[CategoryPrediction]) -> Dict[str, Any]:
-        """Get statistics about classification results."""
-        try:
-            if not predictions:
-                return {}
-            
-            # Count by category
-            category_counts = {}
-            method_counts = {}
-            confidence_scores = []
-            
-            for pred in predictions:
-                category_counts[pred.category] = category_counts.get(pred.category, 0) + 1
-                method_counts[pred.agent_name] = method_counts.get(pred.agent_name, 0) + 1
-                confidence_scores.append(pred.confidence_score)
-            
-            # Calculate average confidence
-            avg_confidence = sum(confidence_scores) / len(confidence_scores)
-            
-            # High confidence predictions
-            high_confidence = len([p for p in predictions if p.confidence_score >= 0.8])
-            
-            return {
-                "total_predictions": len(predictions),
-                "category_distribution": category_counts,
-                "method_distribution": method_counts,
-                "average_confidence": avg_confidence,
-                "high_confidence_count": high_confidence,
-                "high_confidence_rate": high_confidence / len(predictions)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error calculating classification stats: {e}")
-            return {}
-    
-    async def run(self, transactions: List[TransactionData],
-                  known_merchants: Dict[str, str] = None,
-                  similarity_results: Dict[str, List[Tuple[str, float, str]]] = None,
-                  **kwargs) -> Dict[str, Any]:
-        """Agno agent run method."""
-        try:
-            # Classify all transactions
-            predictions = self.classify_batch(transactions, known_merchants, similarity_results)
-            
-            # Get statistics
-            stats = self.get_classification_stats(predictions)
-            
-            return {
-                "status": "success",
-                "predictions": predictions,
-                "stats": stats,
-                "message": f"Classified {len(predictions)} transactions with {stats.get('average_confidence', 0):.3f} average confidence"
-            }
-            
-        except Exception as e:
-            logger.error(f"Classifier agent error: {e}")
-            return {
-                "status": "error",
-                "error": str(e),
-                "predictions": []
-            }
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        print("💡 Please check:")
+        provider = os.getenv('CLASSIFIER_MODEL_PROVIDER', 'gemini').lower()
+        if provider == 'gemini':
+            print("   1. Your .env configuration (GOOGLE_API_KEY is required)")
+            print("   2. Get your Google API key from: https://aistudio.google.com/apikey")
+        else:
+            print("   1. Your .env configuration (OPENAI_API_KEY is required)")
+            print("   2. Set CLASSIFIER_MODEL_PROVIDER=openai in .env")
+        print("   3. FAISS index is built (run: python utils/faiss_index_builder.py)")
+        print("   4. All dependencies are installed (run: pip install -r requirements.txt)")
+

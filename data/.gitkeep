@@ -1,0 +1,6 @@
+# This directory stores:
+# - merchants_seed.csv: Seed data for building merchant index
+# - merchant_rag_index.faiss: FAISS vector index
+# - merchant_rag_metadata.pkl: Metadata for FAISS index
+# - transactions.csv: Sample transaction data for testing
+

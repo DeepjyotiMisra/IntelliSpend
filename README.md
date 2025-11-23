@@ -41,12 +41,68 @@ IntelliSpend employs a sophisticated multi-agent architecture with vector-based 
 
 ### Data Flow
 
-```
-Raw Transactions → Data Validation → Classification Engine → Quality Assurance → Results Export
-                                           ↓
-                                   Vector Similarity Search
-                                           ↓
-                                   Merchant Database (FAISS)
+- **🔧 Preprocessor Agent** — Cleans, normalises, and enriches transaction data
+- **🔍 Retriever Agent** — Converts merchant/category knowledge into vector embeddings using sentence-transformers and stores them in a FAISS index. For every incoming transaction, it retrieves the most semantically similar merchants
+- **🎯 Classifier Agent** — Uses retrieved candidates, payment metadata, and contextual cues to assign an accurate category along with a confidence score
+- **📈 Feedback Agent** — Collects user corrections and updates embeddings dynamically, enabling continuous improvement
+
+This RAG-style pipeline dramatically reduces hallucinations, boosts accuracy for unseen merchants, and provides **interpretable results**.
+
+### 2. Zero-Training Deployment
+
+IntelliSpend works entirely on precomputed embeddings and LLM reasoning. This eliminates the need for model retraining, making the system:
+
+✅ **Lightweight**  
+✅ **Flexible**  
+✅ **Cost-efficient**  
+✅ **Easy to onboard** for banks and fintech startups
+
+### 3. Continuous Feedback & Learning
+
+User feedback on low-confidence predictions is immediately integrated into the knowledge base. This gives IntelliSpend the ability to learn from real-world behaviour without heavy MLOps or retraining pipelines.
+
+Over time, the system becomes:
+- 📊 **More accurate**
+- 🌍 **More localised**
+- 👤 **More personalised**
+
+## 🛠 Technical Approach
+
+| Component | Technology |
+|-----------|------------|
+| **Languages & Frameworks** | Python, Agno, Streamlit |
+| **Vector Store** | FAISS for fast merchant similarity search |
+| **LLM Integration** | OpenAI GPT for contextual classification and reasoning |
+| **Agent Layer** | Agno for orchestrating multi-agent workflows |
+| **Tooling** | MCP server for secure system interaction |
+| **Explainability** | Transparent logs with optional SHAP/LIME visualisation |
+| **Frontend** | Streamlit demo with live categorisation, confidence scores, and instant feedback updates |
+
+## 📊 Evaluation & Metrics
+
+The evaluation pipeline targets:
+
+- 🎯 **Macro F1-score ≥ 0.90**
+- 📈 **Confusion matrix & per-category performance**
+- ⚡ **Latency benchmarking** (FAISS retrieval < 50 ms)
+- 🚀 **Throughput scaling** for production environments
+
+## 🚦 Getting Started
+
+### Prerequisites
+
+- Python 3.12+
+- OpenAI API access or Azure OpenAI endpoint
+- Conda (recommended) or virtual environment
+
+### Quick Setup
+
+For detailed setup instructions, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
+
+1. **Clone the repository**
+```bash
+git clone https://github.com/yourusername/intellispend.git
+cd intellispend
 ```
 
 ## 🚀 Features
@@ -142,6 +198,23 @@ cp .env.example .env
 
 ### 5. Verify Setup
 
+5. **Build FAISS index** (required for transaction processing)
+```bash
+# First, create merchants_seed.csv in data/ directory
+# Then build the index:
+python utils/faiss_index_builder.py
+```
+
+6. **Process transactions** (main pipeline)**
+```bash
+# Process raw_transactions.csv
+python pipeline.py
+
+# Or with custom options:
+python pipeline.py --input data/raw_transactions.csv --output output/results.csv
+```
+
+7. **Run the basic agent** (optional - for testing)
 ```bash
 python setup_check.py
 ```
@@ -187,61 +260,74 @@ python -c "from main import main; main()"
 
 ### Programmatic Usage
 
+#### Process Transactions (Main Use Case)
+
+```bash
+# Process all transactions in raw_transactions.csv
+python pipeline.py
+
+# Output will be saved to output/categorized_transactions.csv
+```
+
+#### Use Agents Directly
+
 ```python
-from agents.agent_team import AgentTeam
-from utils.data_processing import load_sample_transactions
-from agents.parallel_processor import ProcessingConfig
+from agents.preprocessor_agent import create_preprocessor_agent
+from agents.retriever_agent import create_retriever_agent
 
-# Initialize the agent team
-agent_team = AgentTeam()
+# Preprocessor Agent
+preprocessor = create_preprocessor_agent()
+response = preprocessor.run("Normalize: AMAZON PAY INDIA TXN 12345")
 
-# Configure parallel processing
-config = ProcessingConfig(
-    max_workers=4,
-    batch_size=8,
-    parallel_embeddings=True
-)
+# Retriever Agent
+retriever = create_retriever_agent()
+response = retriever.run("Find merchants for: UBER TRIP MUMBAI")
+```
 
-# Load and process transactions
-transactions = load_sample_transactions()
-results = agent_team.process_transactions_parallel(transactions, config)
+#### Use Tools Directly
 
-# Analyze results
-print(f"Processed {len(results['successful'])} transactions successfully")
-print(f"Classification confidence: {results['avg_confidence']:.2f}")
+```python
+from agents.tools import normalize_transaction, retrieve_similar_merchants
+
+# Normalize transaction
+result = normalize_transaction("AMAZON PAY INDIA TXN 12345")
+print(result['normalized'])  # "AMAZON PAY INDIA"
+
+# Retrieve similar merchants
+result = retrieve_similar_merchants("AMAZON PAY INDIA", top_k=3)
+print(result['best_match']['merchant'])  # "Amazon"
 ```
 
 ## 📊 Classification Categories
 
-IntelliSpend supports 11 major categories with 50+ subcategories:
-
-| Category | Subcategories | Examples |
-|----------|---------------|----------|
-| **🍽️ Food & Dining** | restaurants, fast_food, coffee_shops, groceries, bars_alcohol | McDonald's, Starbucks, Whole Foods |
-| **🚗 Transportation** | gas_fuel, public_transport, rideshare, parking, auto_maintenance | Shell, Uber, Metro |
-| **🛍️ Shopping** | clothing, electronics, home_garden, books_media, general_merchandise | Amazon, Target, Best Buy |
-| **🎬 Entertainment** | streaming_services, movies_theater, games, events_concerts, hobbies | Netflix, AMC Theaters |
-| **⚡ Utilities & Bills** | electricity, water, gas, internet, phone, trash | PG&E, Comcast, AT&T |
-| **🏥 Healthcare** | doctor_visits, pharmacy, dental, insurance, fitness | CVS, Walgreens |
-| **💰 Financial** | bank_fees, investments, insurance, loans, transfers | Bank of America |
-| **🎓 Education** | tuition, books_supplies, online_courses, training | Coursera, Amazon Books |
-| **✈️ Travel** | flights, hotels, car_rental, travel_expenses | United Airlines, Hilton |
-| **💵 Income** | salary, freelance, investments, refunds, other_income | Direct Deposit |
-| **📋 Other** | miscellaneous, uncategorized | Various |
-
-## 🔧 Configuration
-
-### Environment Variables
-
-```bash
-# OpenAI Configuration
-OPENAI_API_KEY=your-api-key
-OPENAI_BASE_URL=https://api.openai.com/v1  # Optional: custom endpoint
-MODEL_NAME=gpt-4o  # Optional: specify model
-
-# Optional: Additional configuration
-LOG_LEVEL=INFO
-CACHE_EMBEDDINGS=true
+```
+IntelliSpend/
+├── agents/                     # Multi-agent system
+│   ├── preprocessor_agent.py  # Preprocessor Agent
+│   ├── retriever_agent.py     # Retriever Agent
+│   ├── tools.py               # Agent tools
+│   └── demo_preprocessor_retriever.py  # Demo script
+├── config/                     # Configuration
+│   ├── settings.py            # Settings manager
+│   └── taxonomy.json          # Category taxonomy
+├── utils/                      # Core utilities
+│   ├── data_utils.py          # Data loading & normalization
+│   ├── embedding_service.py   # Embedding generation
+│   ├── faiss_index_builder.py # Index builder
+│   └── faiss_retriever.py     # Similarity search
+├── data/                       # Data files
+│   ├── raw_transactions.csv   # Input transactions
+│   └── merchants_seed.csv     # Merchant seed data
+├── output/                     # Processed outputs
+├── pipeline.py                # Main processing pipeline
+├── docs/                      # Documentation (see docs/README.md)
+│   ├── QUICKSTART.md         # Setup guide
+│   ├── ARCHITECTURE.md       # System architecture
+│   ├── FLOW_DIAGRAM.md       # Process flows
+│   └── ...                   # More docs
+├── requirements.txt           # Python dependencies
+├── .env.example              # Environment template
+└── README.md                 # This file
 ```
 
 ### Processing Configuration

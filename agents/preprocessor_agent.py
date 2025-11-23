@@ -1,305 +1,165 @@
-"""
-Preprocessor Agent - Handles data cleaning and validation for IntelliSpend
-This agent is responsible for cleaning, normalizing, and validating transaction data
-before it's processed by other agents in the pipeline.
-"""
+"""Preprocessor Agent for IntelliSpend - Cleans and normalizes transaction data"""
 
 from agno.agent import Agent
-from agno.tools.file import FileTools
-from typing import List, Dict, Any, Optional
-import pandas as pd
-import re
-from datetime import datetime
+from agno.models.openai import OpenAIChat
+from agno.tools import Toolkit
+from typing import Dict, Any, Optional
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 import logging
-from models.transaction import TransactionData
-from utils.data_processing import TransactionCleaner
+
+from config.settings import settings
+from agents.tools import normalize_transaction, batch_normalize_transactions
 
 logger = logging.getLogger(__name__)
 
+# Load environment configuration
+load_dotenv(Path(__file__).parent.parent / '.env')
 
-class PreprocessorAgent(Agent):
+
+def create_preprocessor_agent() -> Agent:
     """
-    Agent responsible for preprocessing and cleaning transaction data.
+    Create Preprocessor Agent with OpenAI/Azure OpenAI configuration.
     
-    Key responsibilities:
-    - Data validation and cleaning
-    - Amount normalization
-    - Date standardization
-    - Merchant name cleaning
-    - Duplicate detection
-    - Data quality scoring
+    Supports both:
+    - Azure OpenAI (requires AZURE_OPENAI_ENDPOINT, MODEL_API_VERSION)
+    - Direct OpenAI (uses default OpenAI endpoint)
+    
+    The Preprocessor Agent is responsible for:
+    - Cleaning and normalizing transaction descriptions
+    - Extracting payment mode information
+    - Preparing data for downstream processing
     """
+    # Required environment variables
+    api_key = os.getenv('OPENAI_API_KEY')
+    model_name = os.getenv('MODEL_NAME', 'gpt-4o-mini')
+    azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+    api_version = os.getenv('MODEL_API_VERSION')
     
-    def __init__(self):
-        super().__init__(
-            name="PreprocessorAgent",
-            description="Cleans and validates transaction data with advanced validation and priority tools",
-            instructions=[
-                "Clean and normalize transaction amounts",
-                "Standardize merchant names using custom cleaning tools",
-                "Validate date formats and data quality",
-                "Remove duplicates and detect anomalies",
-                "Score data quality and assign processing priority",
-                "Use custom tools for comprehensive data preprocessing"
-            ],
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is required")
+    
+    # Determine if using Azure or direct OpenAI
+    if azure_endpoint and api_version and 'your-azure' not in azure_endpoint.lower():
+        # Azure OpenAI configuration
+        logger.info("Using Azure OpenAI configuration")
+        model_endpoint = (
+            f"{azure_endpoint}/openai/deployments/{model_name}/chat/completions"
+            f"?api-version={api_version}"
+        )
+        model_config = OpenAIChat(
+            id=model_name,
+            base_url=model_endpoint,
+            extra_headers={
+                "Api-Key": api_key,
+                "Content-Type": "application/json"
+            },
+            timeout=60.0,
+            max_retries=3
+        )
+    else:
+        # Direct OpenAI configuration
+        logger.info("Using direct OpenAI configuration")
+        model_config = OpenAIChat(
+            id=model_name,
+            api_key=api_key,
+            timeout=60.0,
+            max_retries=3
+        )
+    
+    # Create toolkit with preprocessing tools
+    # Note: Agno Toolkit accepts functions directly
+    try:
+        toolkit = Toolkit(
+            name="PreprocessingTools",
             tools=[
-                FileTools()  # Built-in file operations
+                normalize_transaction,
+                batch_normalize_transactions
             ]
         )
-        self.merchant_normalizations = self._load_merchant_normalizations()
+        tools_list = [toolkit]
+    except Exception as e:
+        # Fallback: use functions directly if Toolkit doesn't work
+        logger.warning(f"Toolkit creation failed: {e}. Using functions directly.")
+        tools_list = [normalize_transaction, batch_normalize_transactions]
     
-    def _load_merchant_normalizations(self) -> Dict[str, str]:
-        """Load common merchant name normalizations."""
-        return {
-            # Common patterns to normalize
-            r'(?i)amazon\.com.*': 'Amazon',
-            r'(?i)amzn.*': 'Amazon', 
-            r'(?i)starbucks.*': 'Starbucks',
-            r'(?i)walmart.*': 'Walmart',
-            r'(?i)mcdonalds.*': 'McDonald\'s',
-            r'(?i)target.*': 'Target',
-            r'(?i)costco.*': 'Costco',
-            r'(?i)uber.*': 'Uber',
-            r'(?i)lyft.*': 'Lyft',
-            r'(?i)spotify.*': 'Spotify',
-            r'(?i)netflix.*': 'Netflix'
-        }
+    # Create agent
+    agent = Agent(
+        name="PreprocessorAgent",
+        model=model_config,
+        description=(
+            "I am the Preprocessor Agent for IntelliSpend. "
+            "My role is to clean, normalize, and enrich transaction data. "
+            "I can normalize transaction descriptions, extract payment modes, "
+            "and prepare data for classification. "
+            "I ensure transaction strings are standardized and ready for processing."
+        ),
+        tools=tools_list,
+        markdown=True,
+        instructions=[
+            "When asked to normalize a transaction, use the normalize_transaction tool.",
+            "For batch processing, use batch_normalize_transactions tool.",
+            "Always return structured results with original and normalized versions.",
+            "Extract payment mode information when available (UPI, NEFT, IMPS, CARD, etc.)."
+        ]
+    )
     
-    def clean_merchant_name(self, merchant: str) -> str:
-        """Clean and normalize merchant names."""
-        if not merchant or pd.isna(merchant):
-            return "Unknown Merchant"
-        
-        # Convert to string and strip
-        merchant = str(merchant).strip()
-        
-        # Remove common prefixes/suffixes
-        merchant = re.sub(r'^(TST\*|SQ\*|PP\*|PAYPAL\s*\*)', '', merchant, flags=re.IGNORECASE)
-        merchant = re.sub(r'\s+\d{2,}/\d{2}$', '', merchant)  # Remove dates
-        merchant = re.sub(r'\s+#\d+$', '', merchant)  # Remove reference numbers
-        
-        # Apply normalizations
-        for pattern, replacement in self.merchant_normalizations.items():
-            if re.match(pattern, merchant):
-                return replacement
-        
-        # Capitalize properly
-        merchant = ' '.join(word.capitalize() for word in merchant.split())
-        
-        return merchant
+    return agent
+
+
+def preprocess_transaction(description: str) -> Dict[str, Any]:
+    """
+    Convenience function to preprocess a single transaction.
     
-    def normalize_amount(self, amount: Any) -> float:
-        """Normalize transaction amounts."""
-        if pd.isna(amount):
-            return 0.0
-            
-        # Convert to string first
-        amount_str = str(amount).strip()
+    Args:
+        description: Raw transaction description
         
-        # Remove currency symbols and commas
-        amount_str = re.sub(r'[^\d.-]', '', amount_str)
-        
-        try:
-            return float(amount_str)
-        except (ValueError, TypeError):
-            logger.warning(f"Could not parse amount: {amount}")
-            return 0.0
+    Returns:
+        Preprocessed transaction data
+    """
+    agent = create_preprocessor_agent()
     
-    def standardize_date(self, date_val: Any) -> Optional[datetime]:
-        """Standardize date formats."""
-        if pd.isna(date_val):
-            return None
-            
-        if isinstance(date_val, datetime):
-            return date_val
-            
-        # Try to parse various date formats
-        date_formats = [
-            '%Y-%m-%d',
-            '%m/%d/%Y',
-            '%d/%m/%Y',
-            '%Y-%m-%d %H:%M:%S',
-            '%m/%d/%y',
-            '%d-%m-%Y'
+    prompt = f"""
+    Normalize this transaction description: "{description}"
+    
+    Use the normalize_transaction tool to process it.
+    """
+    
+    response = agent.run(prompt)
+    return response.content
+
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Test the preprocessor agent
+    print("🔧 Testing Preprocessor Agent...\n")
+    
+    try:
+        agent = create_preprocessor_agent()
+        
+        # Test cases
+        test_transactions = [
+            "AMAZON PAY INDIA TXN 12345",
+            "UBER TRIP MUMBAI 67890 UPI",
+            "STARBUCKS COFFEE MUMBAI CARD",
+            "ZOMATO ORDER 98765"
         ]
         
-        date_str = str(date_val).strip()
-        for fmt in date_formats:
-            try:
-                return datetime.strptime(date_str, fmt)
-            except ValueError:
-                continue
-        
-        logger.warning(f"Could not parse date: {date_val}")
-        return None
+        for transaction in test_transactions:
+            print(f"📝 Processing: {transaction}")
+            prompt = f'Normalize this transaction: "{transaction}"'
+            response = agent.run(prompt)
+            print(f"✅ Result: {response.content}\n")
+            print("-" * 80)
+            print()
     
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        print("💡 Please check your .env configuration and ensure all dependencies are installed")
 
-    
-    def calculate_quality_score(self, transaction: Dict[str, Any]) -> float:
-        """Calculate data quality score for a transaction."""
-        score = 100.0
-        
-        # Check required fields
-        if not transaction.get('merchant') or transaction.get('merchant') == 'Unknown Merchant':
-            score -= 20
-        
-        if not transaction.get('amount') or transaction.get('amount') == 0:
-            score -= 30
-            
-        if not transaction.get('date'):
-            score -= 30
-            
-        # Check data quality
-        if transaction.get('description') and len(transaction.get('description', '')) < 5:
-            score -= 10
-            
-        # Bonus for complete data
-        if transaction.get('category'):
-            score += 5
-            
-        return max(0.0, min(100.0, score))
-    
-    def preprocess_batch(self, transactions: List[TransactionData]) -> List[TransactionData]:
-        """
-        Batch preprocessing method for parallel processing compatibility.
-        
-        Args:
-            transactions: List of TransactionData objects to preprocess
-            
-        Returns:
-            List of preprocessed TransactionData objects
-        """
-        try:
-            logger.info(f"Batch preprocessing {len(transactions)} transactions")
-            
-            processed_transactions = []
-            
-            for i, transaction in enumerate(transactions):
-                try:
-                    # Clean merchant name
-                    cleaned_merchant = self.clean_merchant_name(transaction.merchant_name)
-                    
-                    # Normalize amount
-                    normalized_amount = self.normalize_amount(transaction.amount)
-                    
-                    # Create new TransactionData with cleaned values
-                    processed_transaction = TransactionData(
-                        id=transaction.id,
-                        transaction_date=transaction.transaction_date,
-                        amount=normalized_amount,
-                        merchant_name=cleaned_merchant,
-                        description=transaction.description
-                    )
-                    
-                    processed_transactions.append(processed_transaction)
-                    
-                except Exception as e:
-                    logger.error(f"Error preprocessing transaction {transaction.id}: {e}")
-                    # Keep original transaction if preprocessing fails
-                    processed_transactions.append(transaction)
-            
-            logger.info(f"Successfully batch preprocessed {len(processed_transactions)} transactions")
-            return processed_transactions
-            
-        except Exception as e:
-            logger.error(f"Error in batch preprocessing: {e}")
-            return transactions  # Return original transactions if batch processing fails
-
-    def process_transactions(self, raw_transactions: List[Dict[str, Any]]) -> List[TransactionData]:
-        """Main processing method for cleaning transaction data."""
-        try:
-            logger.info(f"Processing {len(raw_transactions)} transactions")
-            
-            processed_transactions = []
-            
-            for i, transaction in enumerate(raw_transactions):
-                try:
-                    # Clean and normalize the transaction
-                    # Handle both TransactionData objects and dictionaries
-                    if hasattr(transaction, 'merchant_name'):
-                        # TransactionData object
-                        merchant_value = transaction.merchant_name
-                        date_value = transaction.transaction_date
-                        amount_value = transaction.amount
-                        description_value = transaction.description
-                        transaction_id = getattr(transaction, 'id', f'txn_{i}')
-                        category_value = getattr(transaction, 'category', '')
-                    else:
-                        # Dictionary format
-                        merchant_value = transaction.get('merchant_name') or transaction.get('merchant', '')
-                        date_value = transaction.get('transaction_date') or transaction.get('date')
-                        amount_value = transaction.get('amount')
-                        description_value = transaction.get('description', '')
-                        transaction_id = transaction.get('id', f'txn_{i}')
-                        category_value = transaction.get('category', '')
-                    
-                    cleaned_transaction = {
-                        'id': transaction_id,
-                        'date': self.standardize_date(date_value),
-                        'amount': self.normalize_amount(amount_value),
-                        'merchant': self.clean_merchant_name(merchant_value),
-                        'description': str(description_value).strip(),
-                        'category': category_value,
-                        'account': getattr(transaction, 'account', '') if hasattr(transaction, 'merchant_name') else transaction.get('account', ''),
-                        'transaction_type': getattr(transaction, 'transaction_type', 'debit') if hasattr(transaction, 'merchant_name') else transaction.get('transaction_type', 'debit')
-                    }
-                    
-                    # Calculate quality score
-                    quality_score = self.calculate_quality_score(cleaned_transaction)
-                    cleaned_transaction['quality_score'] = quality_score
-                    
-                    # Convert to TransactionData object
-                    transaction_data = TransactionData(
-                        id=cleaned_transaction['id'],
-                        transaction_date=cleaned_transaction['date'] or datetime.now(),
-                        amount=cleaned_transaction['amount'],
-                        merchant_name=cleaned_transaction['merchant'],
-                        description=cleaned_transaction['description']
-                    )
-                    
-                    processed_transactions.append(transaction_data)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing transaction {i}: {e}")
-                    continue
-            
-            # Detect and flag duplicates using centralized cleaner
-            if len(processed_transactions) > 1:
-                deduplicated = self.cleaner.deduplicate_transactions(processed_transactions)
-                # Calculate which transactions were removed
-                original_ids = {t.id: i for i, t in enumerate(processed_transactions)}
-                remaining_ids = {t.id for t in deduplicated}
-                duplicate_indices = [i for tid, i in original_ids.items() if tid not in remaining_ids]
-                
-                for idx in duplicate_indices:
-                    logger.warning(f"Transaction {idx} flagged as potential duplicate")
-            else:
-                duplicate_indices = []
-            
-            logger.info(f"Successfully processed {len(processed_transactions)} transactions")
-            return processed_transactions
-            
-        except Exception as e:
-            logger.error(f"Error in preprocessing: {e}")
-            return []
-    
-    async def run(self, transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Agno agent run method."""
-        try:
-            processed_transactions = self.process_transactions(transactions)
-            
-            return {
-                "status": "success",
-                "processed_count": len(processed_transactions),
-                "original_count": len(transactions),
-                "transactions": processed_transactions,
-                "message": f"Successfully preprocessed {len(processed_transactions)} transactions"
-            }
-            
-        except Exception as e:
-            logger.error(f"Preprocessor agent error: {e}")
-            return {
-                "status": "error",
-                "error": str(e),
-                "transactions": []
-            }
