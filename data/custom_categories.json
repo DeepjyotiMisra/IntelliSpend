@@ -8,7 +8,7 @@
       "is_custom": true,
       "created_at": "2025-11-17T20:30:37.186937",
       "created_by": "ui_user",
-      "transaction_count": 3
+      "transaction_count": 5
     },
     {
       "id": "custom_coffee_expense",
@@ -33,5 +33,5 @@
   ],
   "version": "1.0",
   "created_at": "2025-11-17T17:56:25.872361",
-  "last_updated": "2025-11-23T10:46:51.643772"
+  "last_updated": "2025-11-23T11:50:19.082563"
 }
